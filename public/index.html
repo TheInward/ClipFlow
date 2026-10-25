@@ -59,6 +59,13 @@
     </header>
 
     <main class="container">
+      <nav class="nav-main" id="navMain">
+        <button class="nav-pill is-active" type="button" data-page="tools">工具</button>
+        <button class="nav-pill" type="button" data-page="studio">创作</button>
+        <button class="nav-pill" type="button" data-page="assets">资产</button>
+        <button class="nav-pill" type="button" data-page="plans">积分</button>
+      </nav>
+      <div id="pageTools">
       <nav class="tabbar" id="tabbar" role="tablist">
         <button class="tab is-active" type="button" data-tab="erase" role="tab">去字幕</button>
         <button class="tab" type="button" data-tab="enhance" role="tab">超清画质</button>
@@ -230,6 +237,72 @@
           <button class="btn btn-primary" id="linkAdd" type="button">添加链接</button>
         </div>
         <div class="notice notice-danger" id="linkNotice" hidden></div>
+      </section>
+      </div><!-- /pageTools -->
+
+      <!-- ===================== 创作台 ===================== -->
+      <section id="pageStudio" hidden>
+        <div class="page-head">
+          <p class="eyebrow">STUDIO</p>
+          <h1>创作台</h1>
+          <p>上传参考素材 + 写一句描述，直接生成图片或视频。</p>
+        </div>
+        <div class="card">
+          <div class="composer">
+            <div class="cp-body">
+              <div class="ref-tile"><span class="plus">＋</span><span>参考内容</span><span class="ref-limit">最多 12 个</span></div>
+              <div class="cp-text"><textarea id="studioPrompt" rows="3" placeholder="上传参考图、输入文字或 @ 主体，描述你想生成的图片。"></textarea></div>
+            </div>
+            <div class="cp-bar">
+              <button class="cchip mode" type="button" id="studioMode">▣ 图片生成 <span class="cv">▾</span></button>
+              <button class="cchip" type="button">◆ 待接入模型 <span class="cv">▾</span></button>
+              <button class="cchip" type="button">⧉ 智能比例 <span class="cv">▾</span></button>
+              <button class="cchip" type="button">◱ 2K <span class="cv">▾</span></button>
+              <button class="cchip" type="button">▢ 2 张 <span class="cv">▾</span></button>
+              <button class="cchip at" type="button">@</button>
+              <div class="cp-right">
+                <span class="cost">✦ 待定价</span>
+                <button class="send" type="button" id="studioSend">↑</button>
+              </div>
+            </div>
+          </div>
+          <div class="notice notice-warn" id="studioNotice">生成服务尚未开通（需要火山方舟 Seedream / Seedance 的 Key 与额度）。当前可先使用「工具」里的处理能力。</div>
+        </div>
+      </section>
+
+      <!-- ===================== 资产 ===================== -->
+      <section id="pageAssets" hidden>
+        <div class="page-head">
+          <p class="eyebrow">ASSETS</p>
+          <h1>资产</h1>
+          <p>上传的素材与处理完成的作品，统一在这里管理。</p>
+        </div>
+        <div class="asset-bar">
+          <div class="filters" id="assetFilters">
+            <button class="cchip on" type="button" data-kind="all">全部 <span class="cnt" id="cntAll">0</span></button>
+            <button class="cchip" type="button" data-kind="video">视频 <span class="cnt" id="cntVideo">0</span></button>
+            <button class="cchip" type="button" data-kind="text">文案 <span class="cnt" id="cntText">0</span></button>
+          </div>
+          <span class="asset-total" id="assetTotal">共 0 项</span>
+        </div>
+        <div class="asset-grid" id="assetGrid"></div>
+        <div class="notice" id="assetEmpty" hidden>还没有资产：先在「工具」里上传并处理一个视频。</div>
+      </section>
+
+      <!-- ===================== 积分 ===================== -->
+      <section id="pagePlans" hidden>
+        <div class="page-head">
+          <p class="eyebrow">CREDITS</p>
+          <h1>积分</h1>
+          <p>处理按秒消耗积分（1 秒 ≈ 1 积分），可用卡密充值。</p>
+        </div>
+        <div class="card">
+          <div class="plans-row">
+            <div class="plan"><h3>免费体验</h3><div class="p">¥0</div><ul><li>注册即用</li><li>标准清晰度</li></ul></div>
+            <div class="plan hot"><span class="tag">推荐</span><h3>充值卡密</h3><div class="p">按需</div><ul><li>30 / 50 / 100 / 200 / 500 / 2000 积分</li><li>联系管理员购买</li></ul>
+              <button class="btn btn-primary" type="button" id="plansRedeem">输入卡密充值</button></div>
+          </div>
+        </div>
       </section>
     </main>
 

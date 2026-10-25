@@ -2561,6 +2561,34 @@ const ROUTES = {
     }
   },
 
+  /** 资产中心：当前用户上传的源文件 + 已完成的处理产物（统一列表） */
+  'GET /api/assets': async (req, res) => {
+    const me = currentUser(req);
+    if (!me) return sendError(res, 401, '请重新登录');
+    const out = [];
+    for (const f of Object.values(db.files || {})) {
+      if (f.userId !== me.id) continue;
+      out.push({
+        id: `file:${f.id}`, fileId: f.id, kind: 'video', source: 'upload',
+        name: f.name, size: f.size || 0, sizeText: formatBytes(f.size || 0),
+        createdAt: f.createdAt, expiresAt: f.expiresAt || null,
+        url: `/f/${f.id}`,
+      });
+    }
+    for (const t of Object.values(db.tasks || {})) {
+      if (t.userId !== me.id || t.status !== 'succeeded' || !t.result) continue;
+      out.push({
+        id: `task:${t.id}`, taskId: t.id, kind: t.result.srt ? 'text' : 'video', source: 'process',
+        name: t.result.name || t.fileName || t.id, size: t.result.size || 0, sizeText: formatBytes(t.result.size || 0),
+        createdAt: t.finishedAt || t.createdAt, expiresAt: t.remoteExpiresAt || null,
+        operation: t.operation, downloadUrl: `/api/download/${t.id}`, remote: !!t.result.remote,
+      });
+    }
+    out.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+    const totalBytes = out.reduce((sum, x) => sum + (Number(x.size) || 0), 0);
+    sendJson(res, 200, { assets: out, total: out.length, totalBytes, totalText: formatBytes(totalBytes) });
+  },
+
   'DELETE /api/files/:id': async (req, res, { params }) => {
     const file = db.files[params.id];
     if (!file) return sendError(res, 404, '文件不存在');

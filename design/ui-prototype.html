@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ClipFlow · 设计原型</title>
+<style>
+  :root{
+    --bg:#f7f8fa; --panel:#ffffff; --ink:#0f1115; --ink-2:#5b6472; --ink-3:#8a93a3;
+    --line:#e8ebf0; --line-2:#f0f2f6;
+    --accent:#4f46e5; --accent-2:#7c6cf6; --accent-soft:#eef0ff;
+    --ok:#10b981; --warn:#f59e0b; --bad:#ef4444;
+    --radius:16px; --radius-sm:10px;
+    --shadow:0 1px 2px rgba(16,24,40,.04), 0 8px 24px rgba(16,24,40,.06);
+    --shadow-lg:0 12px 40px rgba(16,24,40,.10);
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font-family:var(--font);-webkit-font-smoothing:antialiased;font-size:14px;line-height:1.6}
+  button{font-family:inherit}
+  a{color:inherit;text-decoration:none}
+
+  /* ---------- 顶栏 ---------- */
+  .topbar{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:16px;height:60px;padding:0 20px;
+    background:rgba(255,255,255,.82);backdrop-filter:saturate(180%) blur(14px);border-bottom:1px solid var(--line)}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:-.01em;font-size:15px}
+  .logo{width:28px;height:28px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent-2));
+    display:grid;place-items:center;color:#fff;font-size:14px;font-weight:800;box-shadow:0 4px 12px rgba(79,70,229,.28)}
+  .search{flex:1;max-width:460px;display:flex;align-items:center;gap:8px;height:36px;padding:0 12px;
+    background:var(--bg);border:1px solid var(--line);border-radius:999px;color:var(--ink-3);font-size:13px}
+  .search kbd{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink-3);background:#fff;border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+  .top-right{margin-left:auto;display:flex;align-items:center;gap:10px}
+  .credit{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px 0 12px;border-radius:999px;
+    background:var(--accent-soft);color:var(--accent);font-weight:600;font-size:13px;border:1px solid rgba(79,70,229,.14);cursor:pointer}
+  .credit b{font-variant-numeric:tabular-nums}
+  .icon-btn{width:34px;height:34px;border-radius:10px;border:1px solid var(--line);background:#fff;display:grid;place-items:center;cursor:pointer;color:var(--ink-2)}
+  .avatar{width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,#e0e7ff,#c7d2fe);display:grid;place-items:center;
+    font-weight:700;color:var(--accent);font-size:13px;border:1px solid #dbe3ff}
+
+  /* ---------- 布局 ---------- */
+  .layout{display:flex;min-height:calc(100vh - 60px)}
+  .rail{width:232px;flex:0 0 232px;padding:18px 12px;border-right:1px solid var(--line);background:#fbfcfe;position:sticky;top:60px;height:calc(100vh - 60px);overflow:auto}
+  .rail h6{margin:16px 10px 6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+  .nav-item{display:flex;align-items:center;gap:10px;height:38px;padding:0 10px;border-radius:10px;color:var(--ink-2);cursor:pointer;font-size:13.5px}
+  .nav-item:hover{background:#f1f3f9;color:var(--ink)}
+  .nav-item.active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+  .nav-item .dot{width:6px;height:6px;border-radius:50%;background:var(--ink-3);opacity:.5}
+  .nav-item.active .dot{background:var(--accent);opacity:1}
+  .nav-item .badge{margin-left:auto;font-size:11px;color:var(--ink-3);background:#fff;border:1px solid var(--line);border-radius:999px;padding:0 7px}
+
+  .main{flex:1;min-width:0;padding:28px 32px 64px;max-width:1280px;margin:0 auto;width:100%}
+
+  /* ---------- 通用 ---------- */
+  .h1{font-size:26px;letter-spacing:-.02em;font-weight:700;margin:0 0 6px}
+  .sub{color:var(--ink-2);margin:0 0 22px;font-size:14px}
+  .row{display:flex;align-items:center;gap:12px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:38px;padding:0 16px;border-radius:10px;
+    border:1px solid var(--line);background:#fff;color:var(--ink);font-size:13.5px;font-weight:500;cursor:pointer;transition:.15s}
+  .btn:hover{border-color:#d8dce6;box-shadow:0 2px 8px rgba(16,24,40,.05)}
+  .btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent-2));border-color:transparent;color:#fff;box-shadow:0 6px 18px rgba(79,70,229,.28)}
+  .btn.primary:hover{filter:brightness(1.04)}
+  .btn.ghost{background:transparent;border-color:transparent;color:var(--ink-2)}
+  .pill{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:999px;font-size:12px;font-weight:600}
+  .pill.ok{background:#e9f9f2;color:#0b8f63}
+  .pill.run{background:var(--accent-soft);color:var(--accent)}
+  .pill.wait{background:#f3f4f7;color:#5b6472}
+  .pill.bad{background:#fdecec;color:#c33b3b}
+  .muted{color:var(--ink-3);font-size:12.5px}
+
+  /* ---------- Hero ---------- */
+  .hero{position:relative;overflow:hidden;border-radius:22px;padding:34px 34px 30px;margin-bottom:26px;
+    background:radial-gradient(1200px 400px at 10% -10%, rgba(124,108,246,.18), transparent 60%),
+               radial-gradient(900px 400px at 100% 0%, rgba(79,70,229,.14), transparent 55%),#fff;
+    border:1px solid var(--line);box-shadow:var(--shadow)}
+  .hero h1{font-size:30px;letter-spacing:-.03em;margin:0 0 8px;font-weight:750}
+  .hero h1 .grad{background:linear-gradient(90deg,var(--accent),#a855f7);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero p{margin:0 0 20px;color:var(--ink-2);font-size:14.5px}
+  .composer{display:flex;align-items:center;gap:10px;background:#fff;border:1px solid var(--line);border-radius:16px;padding:10px 10px 10px 16px;box-shadow:var(--shadow)}
+  .composer input{flex:1;border:0;outline:none;font-size:14px;color:var(--ink);background:transparent}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+  .chip{font-size:12.5px;color:var(--ink-2);background:#fff;border:1px solid var(--line);border-radius:999px;padding:6px 12px;cursor:pointer}
+  .chip:hover{border-color:#cfd6e4;color:var(--ink)}
+
+  /* ---------- 工具卡 ---------- */
+  .section-head{display:flex;align-items:baseline;justify-content:space-between;margin:30px 0 14px}
+  .section-head h2{font-size:16px;margin:0;letter-spacing:-.01em}
+  .tool-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(228px,1fr));gap:14px}
+  .tool{display:flex;gap:12px;padding:16px;background:#fff;border:1px solid var(--line);border-radius:14px;cursor:pointer;transition:.18s}
+  .tool:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg);border-color:#dfe4ee}
+  .ic{width:40px;height:40px;flex:0 0 40px;border-radius:11px;display:grid;place-items:center;font-size:18px;
+    background:linear-gradient(135deg,#f0f2ff,#e7e9ff);color:var(--accent)}
+  .ic.v{background:linear-gradient(135deg,#eef6ff,#e3efff);color:#2563eb}
+  .ic.a{background:linear-gradient(135deg,#f4f0ff,#ece5ff);color:#7c3aed}
+  .tool h3{margin:0 0 2px;font-size:14px;font-weight:600;letter-spacing:-.01em}
+  .tool p{margin:0;color:var(--ink-3);font-size:12px;line-height:1.5}
+  .tool .tag{margin-top:8px;display:inline-block;font-size:10.5px;color:#0b8f63;background:#e9f9f2;border-radius:6px;padding:1px 6px;font-weight:600}
+  .tool .tag.pro{color:#8a5a00;background:#fff4e0}
+
+  /* ---------- 工作台 ---------- */
+  .workspace{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:18px;align-items:start}
+  .panel{padding:20px}
+  .dropzone{border:1.5px dashed #d6dbe6;border-radius:14px;padding:34px 20px;text-align:center;background:#fbfcff;cursor:pointer;transition:.18s}
+  .dropzone:hover{border-color:var(--accent);background:#f7f7ff}
+  .dropzone .up{width:44px;height:44px;margin:0 auto 10px;border-radius:12px;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;font-size:20px}
+  .field{margin-top:18px}
+  .field > label{display:block;font-size:12.5px;color:var(--ink-2);margin-bottom:8px;font-weight:500}
+  .seg{display:inline-flex;background:#f1f3f8;border-radius:10px;padding:3px}
+  .seg button{border:0;background:transparent;height:30px;padding:0 14px;border-radius:8px;font-size:13px;color:var(--ink-2);cursor:pointer}
+  .seg button.on{background:#fff;color:var(--ink);box-shadow:0 1px 3px rgba(16,24,40,.08);font-weight:600}
+  .select{width:100%;height:38px;border:1px solid var(--line);border-radius:10px;padding:0 12px;background:#fff;font-size:13.5px;color:var(--ink)}
+  .preview{aspect-ratio:9/16;max-height:420px;border-radius:14px;background:
+    radial-gradient(300px 200px at 50% 30%, #ffffff22, transparent),linear-gradient(160deg,#1b1f2a,#0e1118);
+    display:grid;place-items:center;color:#9aa4b5;font-size:12.5px;position:relative;overflow:hidden}
+  .preview .glass{position:absolute;inset:auto 14px 14px;display:flex;gap:8px}
+  .preview .glass span{flex:1;height:34px;border-radius:9px;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.14);display:grid;place-items:center;font-size:12px;color:#dbe2ee}
+  .task-list{display:flex;flex-direction:column}
+  .task{display:flex;align-items:center;gap:14px;padding:14px 2px;border-top:1px solid var(--line-2)}
+  .task:first-child{border-top:0}
+  .thumb{width:52px;height:52px;border-radius:10px;background:linear-gradient(135deg,#eef1ff,#e2e6ff);display:grid;place-items:center;color:var(--accent);font-size:16px}
+  .task .name{font-size:13.5px;font-weight:500}
+  .bar{height:6px;border-radius:99px;background:#eef0f5;overflow:hidden;margin-top:6px;width:220px;max-width:100%}
+  .bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent-2))}
+
+  /* ---------- 套餐 ---------- */
+  .plans{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .plan{padding:22px;border-radius:18px;border:1px solid var(--line);background:#fff;position:relative}
+  .plan.hot{border-color:rgba(79,70,229,.35);box-shadow:0 12px 34px rgba(79,70,229,.14)}
+  .plan .badge{position:absolute;top:-10px;right:16px;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff;font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px}
+  .plan h3{margin:0 0 4px;font-size:15px}
+  .plan .price{font-size:30px;font-weight:750;letter-spacing:-.03em;margin:10px 0 2px}
+  .plan .price small{font-size:13px;font-weight:500;color:var(--ink-3)}
+  .plan ul{list-style:none;padding:0;margin:14px 0 18px;color:var(--ink-2);font-size:13px}
+  .plan li{display:flex;gap:8px;padding:5px 0}
+  .plan li::before{content:"✓";color:var(--ok);font-weight:700}
+
+  .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#0f1115;color:#fff;padding:10px 16px;border-radius:12px;font-size:13px;box-shadow:var(--shadow-lg);opacity:0;pointer-events:none;transition:.25s}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(-4px)}
+  @media (max-width:1080px){ .workspace{grid-template-columns:1fr} .plans{grid-template-columns:1fr} .rail{display:none} .main{padding:20px} }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><div class="logo">C</div>ClipFlow</div>
+  <div class="search">⌕ 搜索工具、模板或粘贴链接… <kbd>⌘K</kbd></div>
+  <div class="top-right">
+    <button class="credit" onclick="go('plans')">⚡ <b>1,280</b> 积分 <span style="opacity:.55">· 充值</span></button>
+    <button class="icon-btn" title="帮助">?</button>
+    <div class="avatar">T</div>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="rail">
+    <div class="nav-item" data-nav="home" onclick="go('home')"><span class="dot"></span>工作台</div>
+    <h6>图片</h6>
+    <div class="nav-item" onclick="openTool('图片翻译')"><span class="dot"></span>图片翻译</div>
+    <div class="nav-item" onclick="openTool('图片擦除')"><span class="dot"></span>图片擦除</div>
+    <div class="nav-item" onclick="openTool('图片去文字')"><span class="dot"></span>图片去文字</div>
+    <div class="nav-item" onclick="openTool('图片超清修复')"><span class="dot"></span>图片超清修复</div>
+    <div class="nav-item" onclick="openTool('图片抠图')"><span class="dot"></span>图片抠图</div>
+    <div class="nav-item" onclick="openTool('图片转动漫')"><span class="dot"></span>图片转动漫</div>
+    <div class="nav-item" onclick="openTool('无痕改字')"><span class="dot"></span>AI 无痕改字 <span class="badge">新</span></div>
+    <h6>视频</h6>
+    <div class="nav-item" onclick="openTool('去字幕')"><span class="dot"></span>视频去文字</div>
+    <div class="nav-item" onclick="openTool('智能擦除物体')"><span class="dot"></span>智能擦除物体 <span class="badge">hot</span></div>
+    <div class="nav-item" onclick="openTool('视频翻译')"><span class="dot"></span>视频翻译</div>
+    <div class="nav-item" onclick="openTool('超清画质')"><span class="dot"></span>超清画质</div>
+    <div class="nav-item" onclick="openTool('人声分离')"><span class="dot"></span>人声分离</div>
+    <div class="nav-item" onclick="openTool('视频转动漫')"><span class="dot"></span>视频转动漫</div>
+    <div class="nav-item" onclick="openTool('视频转 GIF')"><span class="dot"></span>视频转 GIF</div>
+    <div class="nav-item" onclick="openTool('文案提取')"><span class="dot"></span>文案提取</div>
+    <h6>音频</h6>
+    <div class="nav-item" onclick="openTool('视频转音频')"><span class="dot"></span>视频转音频</div>
+    <div class="nav-item" onclick="openTool('音频分割')"><span class="dot"></span>音频分割</div>
+    <div class="nav-item" onclick="openTool('音频拼接')"><span class="dot"></span>音频拼接</div>
+    <div class="nav-item" onclick="openTool('音频混音')"><span class="dot"></span>音频混音</div>
+    <div class="nav-item" onclick="openTool('文字转语音')"><span class="dot"></span>文字转语音</div>
+    <h6>账号</h6>
+    <div class="nav-item" data-nav="tasks" onclick="go('tasks')"><span class="dot"></span>我的任务 <span class="badge">6</span></div>
+    <div class="nav-item" data-nav="plans" onclick="go('plans')"><span class="dot"></span>积分与套餐</div>
+  </aside>
+
+  <main class="main" id="main"></main>
+</div>
+<div class="toast" id="toast">已提交任务</div>
+
+<script>
+const TOOLS = {
+  '图片翻译':{k:'i',ic:'译',d:'电商主图/详情页一键翻译，自动重排版'},
+  '图片擦除':{k:'i',ic:'擦',d:'涂抹擦除路人、logo、杂物'},
+  '图片去文字':{k:'i',ic:'文',d:'识别并擦除图片中的全部文字'},
+  '图片超清修复':{k:'i',ic:'清',d:'老照片/模糊图 AI 超分修复'},
+  '图片抠图':{k:'i',ic:'抠',d:'自动抠主体，可换纯色/自定义背景'},
+  '图片转动漫':{k:'i',ic:'漫',d:'照片转动漫插画风'},
+  '无痕改字':{k:'i',ic:'改',d:'仿写原文排版，一键无痕替换文字',tag:'旗舰'},
+  '去字幕':{k:'v',ic:'字',d:'逐帧擦除硬字幕/水印文字，保留画面'},
+  '智能擦除物体':{k:'v',ic:'除',d:'擦除画面中的人、物体、LOGO',tag:'hot'},
+  '视频翻译':{k:'v',ic:'译',d:'语音识别→翻译→配音→字幕压制',tag:'出海'},
+  '超清画质':{k:'v',ic:'超',d:'去噪/锐化/超分，2K 输入'},
+  '人声分离':{k:'v',ic:'声',d:'分离人声与伴奏，可单独导出'},
+  '视频转动漫':{k:'v',ic:'风',d:'真人视频转动漫风格',tag:'Pro'},
+  '视频转 GIF':{k:'v',ic:'G',d:'截取片段生成高质量 GIF'},
+  '文案提取':{k:'v',ic:'取',d:'识别语音/画面字幕，导出 SRT/TXT'},
+  '视频转音频':{k:'a',ic:'音',d:'提取原声，支持多种格式'},
+  '音频分割':{k:'a',ic:'分',d:'按时间轴裁剪音频片段'},
+  '音频拼接':{k:'a',ic:'拼',d:'多段音频顺序合并'},
+  '音频混音':{k:'a',ic:'混',d:'多轨混音，调节各自音量'},
+  '文字转语音':{k:'a',ic:'T',d:'多音色 TTS，可克隆音色'},
+};
+const g = k => TOOLS[k] || {k:'i',ic:'·',d:''};
+
+function toolCard(name){
+  const t=g(name);
+  return `<div class="tool" onclick="openTool('${name}')">
+    <div class="ic ${t.k}">${t.ic}</div>
+    <div style="min-width:0">
+      <h3>${name}</h3><p>${t.d}</p>
+      ${t.tag?`<span class="tag ${t.tag==='Pro'?'pro':''}">${t.tag}</span>`:''}
+    </div>
+  </div>`;
+}
+const grid = names => `<div class="tool-grid">${names.map(toolCard).join('')}</div>`;
+
+function go(screen){
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active', n.dataset.nav===screen));
+  if(screen==='home') main.innerHTML = homeScreen();
+  if(screen==='tasks') main.innerHTML = tasksScreen();
+  if(screen==='plans') main.innerHTML = plansScreen();
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+function homeScreen(){
+  return `
+  <section class="hero">
+    <h1>把视频和图片，<span class="grad">交给 AI 处理</span></h1>
+    <p>上传或粘贴链接，一句话完成去字幕、擦除、翻译、超清、抠图与配音。</p>
+    <div class="composer">
+      <span style="color:var(--ink-3)">✦</span>
+      <input placeholder="例如：去掉这个视频里的字幕和台标，换成英文配音" />
+      <button class="btn primary" onclick="toast('已开始处理（原型演示）')">开始处理</button>
+    </div>
+    <div class="chips">
+      <span class="chip" onclick="openTool('去字幕')">去字幕</span>
+      <span class="chip" onclick="openTool('智能擦除物体')">擦除物体/人物</span>
+      <span class="chip" onclick="openTool('视频翻译')">视频翻译</span>
+      <span class="chip" onclick="openTool('超清画质')">超清 4K</span>
+      <span class="chip" onclick="openTool('文案提取')">提取文案</span>
+      <span class="chip" onclick="openTool('文字转语音')">AI 配音</span>
+    </div>
+  </section>
+  <div class="section-head"><h2>最近任务</h2><span class="muted" onclick="go('tasks')" style="cursor:pointer">全部 ›</span></div>
+  <div class="card panel">
+    ${taskRow('带货视频-去字幕','去字幕 · 42 秒','done',100)}
+    ${taskRow('口播素材-擦除台标','智能擦除物体 · 1 分 12 秒','run',64)}
+    ${taskRow('海外版-视频翻译','视频翻译 · 30 秒','done',100)}
+  </div>
+  <div class="section-head"><h2>视频工具</h2><span class="muted">8 个</span></div>
+  ${grid(['去字幕','智能擦除物体','视频翻译','超清画质','人声分离','视频转动漫','视频转 GIF','文案提取'])}
+  <div class="section-head"><h2>图片工具</h2><span class="muted">7 个</span></div>
+  ${grid(['图片翻译','图片擦除','图片去文字','图片超清修复','图片抠图','图片转动漫','无痕改字'])}
+  <div class="section-head"><h2>音频工具</h2><span class="muted">5 个</span></div>
+  ${grid(['视频转音频','音频分割','音频拼接','音频混音','文字转语音'])}
+  `;
+}
+
+function taskRow(name,meta,state,pct){
+  const pill = state==='done'?`<span class="pill ok">已完成</span>`:`<span class="pill run">处理中 ${pct}%</span>`;
+  return `<div class="task">
+    <div class="thumb">▶</div>
+    <div style="flex:1;min-width:0">
+      <div class="name">${name}</div>
+      <div class="muted">${meta}</div>
+      ${state==='run'?`<div class="bar"><i style="width:${pct}%"></i></div>`:''}
+    </div>
+    ${pill}
+    <button class="btn ghost">${state==='done'?'下载':'查看'}</button>
+  </div>`;
+}
+
+function tasksScreen(){
+  return `<h1 class="h1">我的任务</h1>
+  <p class="sub">所有处理记录，结果保留 7 天可重新下载</p>
+  <div class="card panel">
+  ${taskRow('带货视频-去字幕.mp4','去字幕 · 42 秒 · 今天 14:02','done',100)}
+  ${taskRow('口播素材-擦除台标.mp4','智能擦除物体 · 1 分 12 秒 · 今天 13:40','run',64)}
+  ${taskRow('海外版-视频翻译.mp4','视频翻译 · 30 秒 · 今天 11:20','done',100)}
+  ${taskRow('封面-无痕改字.png','无痕改字 · 图片 · 昨天','done',100)}
+  ${taskRow('商品主图-翻译.png','图片翻译 · 昨天','done',100)}
+  ${taskRow('播客-人声分离.mp3','人声分离 · 昨天','done',100)}
+  </div>`;
+}
+
+function plansScreen(){
+  return `<h1 class="h1">积分与套餐</h1>
+  <p class="sub">所有功能按处理时长消耗积分，1 秒 ≈ 1 积分；套餐更划算</p>
+  <div class="plans">
+    <div class="plan">
+      <h3>免费体验</h3><div class="price">¥0</div>
+      <ul><li>注册送 100 积分</li><li>图片工具限 2 张</li><li>导出 720P</li><li>排队优先级低</li></ul>
+      <button class="btn" style="width:100%">当前套餐</button>
+    </div>
+    <div class="plan hot">
+      <span class="badge">推荐</span>
+      <h3>月会员</h3><div class="price">¥39<small>/月</small></div>
+      <ul><li>含 5,000 积分</li><li>去字幕/擦除/翻译全功能</li><li>导出 1080P / 2K</li><li>优先队列 + 批量处理</li></ul>
+      <button class="btn primary" style="width:100%">立即开通</button>
+    </div>
+    <div class="plan">
+      <h3>年会员</h3><div class="price">¥299<small>/年</small></div>
+      <ul><li>含 60,000 积分</li><li>含 Pro 模型（视频转动漫等）</li><li>导出 4K / HEVC</li><li>专属客服</li></ul>
+      <button class="btn" style="width:100%">省 36%</button>
+    </div>
+  </div>
+  <div class="section-head"><h2>积分充值</h2></div>
+  <div class="card panel row" style="justify-content:space-between;flex-wrap:wrap;gap:12px">
+    <div><div class="name">需要更多积分？</div><div class="muted">支持微信 / 支付宝，充值即时到账</div></div>
+    <div class="row">
+      <button class="btn">1,000 积分 ¥10</button>
+      <button class="btn">5,000 积分 ¥45</button>
+      <button class="btn primary">20,000 积分 ¥160</button>
+    </div>
+  </div>`;
+}
+
+function openTool(name){
+  const t=g(name);
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  main.innerHTML = `
+  <div class="row" style="margin-bottom:8px"><button class="btn ghost" onclick="go('home')">‹ 返回</button>
+    <span class="muted">视频工具 / ${name}</span></div>
+  <h1 class="h1">${name}</h1>
+  <p class="sub">${t.d}</p>
+  <div class="workspace">
+    <div class="card panel">
+      <div class="dropzone" onclick="toast('原型演示：选择文件')">
+        <div class="up">↑</div>
+        <div style="font-weight:600">拖拽视频到这里，或点击选择</div>
+        <div class="muted" style="margin-top:6px">支持 MP4 / MOV / MKV / AVI / FLV / TS / WMV，单个 ≤ 500MB</div>
+      </div>
+      <div class="field">
+        <label>处理模式</label>
+        <div class="seg"><button class="on">标准</button><button>全屏</button><button>自定义区域</button></div>
+      </div>
+      <div class="field">
+        <label>输出规格</label>
+        <select class="select"><option>1080P · H.264（推荐）</option><option>2K · H.264</option><option>4K · HEVC（年会员）</option></select>
+      </div>
+      <div class="field row" style="justify-content:space-between;align-items:center">
+        <span class="muted">预计消耗 42 积分 · 约 2 分钟</span>
+        <button class="btn primary" onclick="toast('已提交任务，可在「我的任务」查看')">开始处理</button>
+      </div>
+    </div>
+    <div>
+      <div class="card panel" style="padding:12px">
+        <div class="preview">结果预览
+          <div class="glass"><span>◀ 原片</span><span>处理后 ▶</span></div>
+        </div>
+        <div class="row" style="justify-content:space-between;margin-top:12px">
+          <span class="muted">未开始</span>
+          <button class="btn" disabled>下载结果</button>
+        </div>
+      </div>
+      <div class="card panel" style="margin-top:14px">
+        <div class="muted" style="margin-bottom:10px">处理队列</div>
+        ${taskRow('当前任务','等待上传','run',0)}
+      </div>
+    </div>
+  </div>`;
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+let tid;
+function toast(msg){ const el=document.getElementById('toast'); el.textContent=msg; el.classList.add('show'); clearTimeout(tid); tid=setTimeout(()=>el.classList.remove('show'),1800); }
+go('home');
+</script>
+</body>
+</html>

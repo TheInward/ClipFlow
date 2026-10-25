@@ -22,7 +22,9 @@ const el = {
   asrRow: $('#asrRow'), asrLang: $('#asrLang'), asrBurn: $('#asrBurn'), tcRow: $('#tcRow'), tcProfile: $('#tcProfile'),
   moreRow: $('#moreRow'), moreOp: $('#moreOp'), regionFields: $('#regionFields'), regionMode: $('#regionMode'),
   regionX: $('#regionX'), regionY: $('#regionY'), regionW: $('#regionW'), regionH: $('#regionH'), moreMode: $('#moreMode'), moreMask: $('#moreMask'), moreStrength: $('#moreStrength'), moreBg: $('#moreBg'), moreHint: $('#moreHint'),
-  tabbar: $('#tabbar'), uploadCard: $('#uploadCard'), linkCard: $('#linkCard'), linkInputs: $('#linkInputs'), linkAdd: $('#linkAdd'),
+  tabbar: $('#tabbar'), navMain: $('#navMain'), assetFilters: $('#assetFilters'), assetGrid: $('#assetGrid'),
+  assetEmpty: $('#assetEmpty'), assetTotal: $('#assetTotal'), cntAll: $('#cntAll'), cntVideo: $('#cntVideo'), cntText: $('#cntText'),
+  studioSend: $('#studioSend'), studioNotice: $('#studioNotice'), plansRedeem: $('#plansRedeem'), uploadCard: $('#uploadCard'), linkCard: $('#linkCard'), linkInputs: $('#linkInputs'), linkAdd: $('#linkAdd'),
   linkNotice: $('#linkNotice'), pageTitle: $('#pageTitle'), pageDesc: $('#pageDesc'),
   batchCard: $('#batchCard'), batchSub: $('#batchSub'), batchPill: $('#batchPill'), notice: $('#notice'),
   diskWarn: $('#diskWarn'),
@@ -1723,3 +1725,107 @@ async function refreshHeader() {
 refreshHeader();
 setTimeout(refreshHeader, 1200);
 setInterval(refreshHeader, 10000);
+
+/* ============================================================================
+ * 顶层页面：工具 / 创作 / 资产 / 积分
+ * ========================================================================== */
+const PAGE_IDS = { tools: 'pageTools', studio: 'pageStudio', assets: 'pageAssets', plans: 'pagePlans' };
+let currentPage = 'tools';
+let assetKind = 'all';
+let assetList = [];
+
+function switchPage(page) {
+  if (!PAGE_IDS[page]) return;
+  currentPage = page;
+  for (const [k, id] of Object.entries(PAGE_IDS)) {
+    const node = document.getElementById(id);
+    if (node) node.hidden = k !== page;
+  }
+  document.querySelectorAll('#navMain .nav-pill').forEach((b) => {
+    b.classList.toggle('is-active', b.dataset.page === page);
+  });
+  if (page === 'assets') loadAssets();
+  if (page === 'studio' && el.studioNotice) {
+    // 生成服务未接入时给出明确提示（不阻塞其它功能）
+    el.studioNotice.hidden = false;
+  }
+}
+
+async function loadAssets() {
+  if (!el.assetGrid) return;
+  try {
+    const data = await jsonApi('/api/assets');
+    assetList = data.assets || [];
+  } catch (err) {
+    assetList = [];
+    toast(`资产加载失败：${err.message}`);
+  }
+  const cnt = (kind) => assetList.filter((a) => kind === 'all' || a.kind === kind).length;
+  if (el.cntAll) el.cntAll.textContent = cnt('all');
+  if (el.cntVideo) el.cntVideo.textContent = cnt('video');
+  if (el.cntText) el.cntText.textContent = cnt('text');
+  if (el.assetTotal) el.assetTotal.textContent = `共 ${assetList.length} 项`;
+  const list = assetList.filter((a) => assetKind === 'all' || a.kind === assetKind);
+  el.assetGrid.innerHTML = '';
+  el.assetEmpty.hidden = list.length > 0;
+  const ICON = { video: '▶', text: 'T', audio: '♫', image: '▣' };
+  for (const a of list) {
+    const card = document.createElement('div');
+    card.className = 'asset';
+    card.innerHTML = `
+      <div class="a-thumb">${ICON[a.kind] || '▶'}<span class="a-badge">${a.source === 'upload' ? '上传' : '处理'}</span></div>
+      <div class="a-name" title="${escapeHtml(a.name || '')}">${escapeHtml(a.name || '')}</div>
+      <div class="a-meta">${a.kind === 'text' ? '字幕/文稿' : (a.remote ? '云端保存' : '本地保存')}${a.sizeText ? ' · ' + a.sizeText : ''}</div>
+      <div class="a-date">${a.createdAt ? new Date(a.createdAt).toLocaleString('zh-CN', { hour12: false }) : ''}</div>
+      <div class="a-acts"></div>`;
+    const acts = card.querySelector('.a-acts');
+    const dl = document.createElement(a.downloadUrl ? 'a' : 'button');
+    dl.textContent = '下载';
+    if (a.downloadUrl) {
+      dl.href = a.downloadUrl;
+    } else {
+      dl.addEventListener('click', () => { window.location.href = a.url; });
+    }
+    acts.appendChild(dl);
+    const open = document.createElement('button');
+    open.textContent = '去处理';
+    open.addEventListener('click', () => {
+      switchPage('tools');
+      toast('已切到工具页：请上传或选择文件后处理');
+    });
+    acts.appendChild(open);
+    if (a.source === 'upload' && a.fileId) {
+      const del = document.createElement('button');
+      del.textContent = '删除';
+      del.addEventListener('click', async () => {
+        if (!confirm(`删除资产「${a.name}」？若仍被任务引用会保留。`)) return;
+        try { await jsonApi(`/api/files/${a.fileId}`, { method: 'DELETE' }); toast('已删除'); loadAssets(); }
+        catch (err) { toast(`删除失败：${err.message}`); }
+      });
+      acts.appendChild(del);
+    }
+    el.assetGrid.appendChild(card);
+  }
+}
+
+if (el.navMain) {
+  el.navMain.addEventListener('click', (e) => {
+    const btn = e.target.closest('.nav-pill');
+    if (btn) switchPage(btn.dataset.page);
+  });
+}
+if (el.assetFilters) {
+  el.assetFilters.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-kind]');
+    if (!b) return;
+    assetKind = b.dataset.kind;
+    el.assetFilters.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+    loadAssets();
+  });
+}
+if (el.studioSend) {
+  el.studioSend.addEventListener('click', () => toast('生成服务尚未开通：需要接入火山方舟 Seedream / Seedance'));
+}
+if (el.plansRedeem) {
+  el.plansRedeem.addEventListener('click', () => redeemPrompt());
+}

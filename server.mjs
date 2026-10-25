@@ -20,6 +20,7 @@ import crypto from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { enhanceVideo } from './pipeline.mjs';
+import { ZipStream, streamRemote } from './zip.mjs';
 import { probeVideoDuration, probeAvailable } from './media.mjs';
 import { normalizePhone, findUserByPhone, createUser, checkPassword, publicUser, createUserSession, chargeSeconds, refundSeconds, createCodes, redeemCode, ensureAdmin, setPassword, touchSession } from './accounts.mjs';
 import { take as takeToken, stats as rateStats } from './ratelimit.mjs';
@@ -264,6 +265,8 @@ const LOGIN_WINDOW_MS = Math.max(1000, Number(process.env.LOGIN_WINDOW_MS || 10 
 const VIDEO_EXT = new Set(['.mp4', '.mov', '.mkv', '.avi', '.flv', '.ts', '.wmv']);
 // 超清（enhance-video）支持的目标分辨率档位
 const ENHANCE_RESOLUTIONS = ['720p', '1080p', '2k', '4k'];
+// 超清版本：标准版（快）/ 专业版（更清晰、更慢、计费更高）
+const ENHANCE_VERSIONS = ['standard', 'professional'];
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -1075,7 +1078,7 @@ async function execute(task) {
       const assertAlive = () => { if (task.canceled) throw Object.assign(new Error('任务已取消'), { code: 'CANCELED' }); };
       console.log(`[enhance] 任务 ${task.id} 开始超清（${task.resolution || '自动'}，原片 ${task.durationSec || '?'}s，已扣 ${task.chargedCredits} 积分）`);
       const enh = await enhanceVideo(publicFileUrl(file.id), {
-        taskId: task.remoteTaskId, assertAlive, resolution: task.resolution || null,
+        taskId: task.remoteTaskId, assertAlive, resolution: task.resolution || null, toolVersion: task.toolVersion || null,
         onSubmitted: (id) => { task.remoteTaskId = id; saveDb(); },
       });
       assertAlive();
@@ -1345,7 +1348,7 @@ async function startTask(task, user, { force = false } = {}) {
   return true;
 }
 
-function createTaskForFile(file, { operation = DEFAULT_OPERATION, userId, enhance = false, eraseRegion, eraseMode, modelVersion, resolution = null } = {}) {
+function createTaskForFile(file, { operation = DEFAULT_OPERATION, userId, enhance = false, eraseRegion, eraseMode, modelVersion, resolution = null, toolVersion = null } = {}) {
   const dur = file.durationVerified ? Number(file.durationSec) : NaN;
   const hasDuration = Number.isFinite(dur) && dur > 0.5 && dur < 6 * 3600;
   const mode = resolveEraseMode(eraseMode || OPERATIONS[operation]?.mode || 'Subtitle');
@@ -1365,6 +1368,8 @@ function createTaskForFile(file, { operation = DEFAULT_OPERATION, userId, enhanc
     userId: userId || null,
     enhance: !!enhance,
     resolution: resolution || null,
+    toolVersion: toolVersion || null,
+    toolVersion: toolVersion || null,
     operation,
     operationLabel: OPERATIONS[operation].label,
     mode,                                        // Subtitle | Text
@@ -1401,7 +1406,7 @@ function resultKey(file, task) {
   const regions = (task.eraseRatioLocation || []).map((r) =>
     ['top_left_x', 'top_left_y', 'bottom_right_x', 'bottom_right_y'].map((k) => r[k])).sort();
   return JSON.stringify([file.md5, task.userId, task.operation, task.mode,
-    task.modelVersion || null, regions, !!task.enhance, task.resolution || null]);
+    task.modelVersion || null, regions, !!task.enhance, task.resolution || null, task.toolVersion || null]);
 }
 
 function resultOfKey(key) {
@@ -1437,7 +1442,7 @@ function renewForReuse(file, task) {
 function appendFilesToBatch(batch, fileIds, durations = {}, overrides = {}) {
   const eff = applyErasePreset({ preset: overrides.erasePreset || batch.erasePreset,
     region: overrides.eraseRegion, mode: overrides.eraseMode, model: overrides.modelVersion });
-  const settings = { userId: batch.userId, operation: batch.operation, mode: eff.mode, resolution: overrides.resolution || batch.resolution || null,
+  const settings = { userId: batch.userId, operation: batch.operation, mode: eff.mode, resolution: overrides.resolution || batch.resolution || null, toolVersion: overrides.toolVersion || batch.toolVersion || null,
     modelVersion: eff.model || (eff.mode === 'Text' ? 'v5.6' : null),
     eraseRatioLocation: eff.region, enhance: overrides.enhance ?? batch.enhance };
   const added = [];
@@ -1454,7 +1459,7 @@ function appendFilesToBatch(batch, fileIds, durations = {}, overrides = {}) {
     if (hit) { renewForReuse(file, task); hit.rec.reused += 1; }
     if (!task) {
       task = createTaskForFile(file, { operation: batch.operation, userId: batch.userId, enhance: settings.enhance,
-        eraseRegion: eff.region, eraseMode: eff.mode, modelVersion: settings.modelVersion, resolution: settings.resolution });
+        eraseRegion: eff.region, eraseMode: eff.mode, modelVersion: settings.modelVersion, resolution: settings.resolution, toolVersion: settings.toolVersion });
       task.erasePreset = eff.preset;
     }
     const item = { fileId: fid, taskId: task.id, shared, reused: !!hit,
@@ -1466,7 +1471,7 @@ function appendFilesToBatch(batch, fileIds, durations = {}, overrides = {}) {
   return added;
 }
 
-function createBatch({ fileIds, operation = DEFAULT_OPERATION, durations = {}, userId, enhance = false, erasePreset = 'standard', eraseRegion, eraseMode, modelVersion, resolution = null } = {}) {
+function createBatch({ fileIds, operation = DEFAULT_OPERATION, durations = {}, userId, enhance = false, erasePreset = 'standard', eraseRegion, eraseMode, modelVersion, resolution = null, toolVersion = null } = {}) {
   db.batches ||= {};
   const batch = {
     id: id('batch'),
@@ -1479,7 +1484,7 @@ function createBatch({ fileIds, operation = DEFAULT_OPERATION, durations = {}, u
     taskIds: [],
     items: [],
   };
-  appendFilesToBatch(batch, fileIds, durations, { erasePreset: batch.erasePreset, eraseRegion, eraseMode, modelVersion, resolution });
+  appendFilesToBatch(batch, fileIds, durations, { erasePreset: batch.erasePreset, eraseRegion, eraseMode, modelVersion, resolution, toolVersion: batch.toolVersion });
   db.batches[batch.id] = batch;
   saveDb();
   const reusedN = batch.items.filter((i) => i.reused).length;
@@ -1604,6 +1609,7 @@ function serializeBatch(batch) {
       enhance: !!batch.enhance,
       operation: batch.operation,
       resolution: batch.resolution || null,
+      toolVersion: batch.toolVersion || null,
       counts,
       progressPct,
       etaSeconds,
@@ -2001,6 +2007,9 @@ const ROUTES = {
     if (body.resolution != null && !ENHANCE_RESOLUTIONS.includes(String(body.resolution))) {
       return sendError(res, 400, `未知的超清分辨率 ${body.resolution}`, { allowed: ENHANCE_RESOLUTIONS });
     }
+    if (body.toolVersion != null && !ENHANCE_VERSIONS.includes(String(body.toolVersion))) {
+      return sendError(res, 400, `未知的超清版本 ${body.toolVersion}`, { allowed: ENHANCE_VERSIONS });
+    }
 
     const files = [];
     for (const fid of fileIds) {
@@ -2024,7 +2033,7 @@ const ROUTES = {
     }
 
     const batch = createBatch({
-    userId: currentUser(req)?.id || null, enhance: body.enhance === true, fileIds, operation, durations: body.durations || {}, erasePreset: body.erasePreset, eraseRegion: body.eraseRegion, eraseMode: body.eraseMode, modelVersion: body.modelVersion, resolution: body.resolution || null });
+    userId: currentUser(req)?.id || null, enhance: body.enhance === true, fileIds, operation, durations: body.durations || {}, erasePreset: body.erasePreset, eraseRegion: body.eraseRegion, eraseMode: body.eraseMode, modelVersion: body.modelVersion, resolution: body.resolution || null, toolVersion: body.toolVersion || null });
     sendJson(res, 202, { ...serializeBatch(batch), poll: `/api/batches/${batch.id}` });
   },
 
@@ -2254,6 +2263,59 @@ const ROUTES = {
     saveDb();
     console.log(`[batch] ${batch.id} 链接批次：${created.length} 个链接，跳过 ${skipped.length} 个`);
     sendJson(res, 202, { ...serializeBatch(batch), skipped, poll: `/api/batches/${batch.id}` });
+  },
+
+  /** 把一个批次里「已完成」的产物打成一个 zip 流式下载（不落盘，边下边打） */
+  'GET /api/batches/:id/zip': async (req, res, { params }) => {
+    const batch = db.batches?.[params.id];
+    if (!batch) return sendError(res, 404, '批次不存在或已被清理');
+    const done = (batch.items || [])
+      .map((it) => db.tasks[it.taskId])
+      .filter((t) => t && t.status === 'succeeded' && t.result && t.result.hasVideo !== false);
+    if (!done.length) return sendError(res, 409, '这个批次还没有已完成的产物');
+    if (done.length > MAX_BATCH_SIZE) return sendError(res, 400, `一次最多打包 ${MAX_BATCH_SIZE} 个`);
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '');
+    const zipName = `clipflow-${stamp}.zip`;
+    res.writeHead(200, {
+      'content-type': 'application/zip',
+      'content-disposition': `attachment; filename="clipflow-${stamp}.zip"; filename*=UTF-8''${encodeURIComponent(zipName)}`,
+      'cache-control': 'no-store',
+    });
+    const zip = new ZipStream(res);
+    const used = new Set();
+    let added = 0;
+    try {
+      for (const task of done) {
+        let name = sanitizeName(task.result.name || `${task.fileName || task.id}.mp4`) || `${task.id}.mp4`;
+        if (used.has(name)) {
+          const dot = name.lastIndexOf('.');
+          const base = dot > 0 ? name.slice(0, dot) : name;
+          const ext = dot > 0 ? name.slice(dot) : '';
+          let i = 2;
+          while (used.has(`${base} (${i})${ext}`)) i += 1;
+          name = `${base} (${i})${ext}`;
+        }
+        used.add(name);
+        const localPath = path.join(OUTPUT_DIR, task.id, 'output.mp4');
+        const useLocal = !task.result.remote && await fsp.stat(localPath).then((s) => s.isFile()).catch(() => false);
+        if (useLocal) {
+          const { createReadStream } = await import('node:fs');
+          await zip.addStream(name, task.result.size || 0, () => createReadStream(localPath));
+        } else if (task.remoteResultUrl) {
+          await zip.addStream(name, task.result.size || 0, () => streamRemote(task.remoteResultUrl));
+        } else {
+          continue; // 既没有本地也没有云端地址：跳过
+        }
+        added += 1;
+      }
+      await zip.finish();
+      res.end();
+      console.log(`[zip] ${batch.id} 打包 ${added}/${done.length} 个产物`);
+    } catch (err) {
+      console.error('[zip]', err.message);
+      if (!res.headersSent) sendError(res, 500, '打包失败，请稍后重试');
+      else res.destroy(err);
+    }
   },
 
   'DELETE /api/files/:id': async (req, res, { params }) => {

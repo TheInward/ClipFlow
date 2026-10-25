@@ -101,7 +101,12 @@
             <option value="2k">2K</option>
             <option value="4k">4K（最慢）</option>
           </select>
-          <span class="hint-inline">超分到指定分辨率；输入最高支持 2K，耗时随档位上升（按原片秒数计费，与档位无关）</span>
+          <label for="verSelect">增强版本</label>
+          <select id="verSelect">
+            <option value="standard" selected>标准版（快，推荐）</option>
+            <option value="professional">专业版（更清晰，更慢更贵）</option>
+          </select>
+          <span class="hint-inline">超分到指定分辨率；输入最高支持 2K。按原片秒数计费，与档位/版本无关（专业版云端单价更高，成本差异由我们承担）</span>
         </div>
         <div class="notice notice-danger" id="diskWarn" hidden></div>
       </section>
@@ -140,6 +145,7 @@
           <div class="right">
             <button class="btn btn-primary" id="batchStart" type="button">批量开始</button>
             <button class="btn btn-ghost btn-stop" id="batchCancel" type="button">批量取消</button>
+            <button class="btn btn-ghost" id="batchZip" type="button">打包下载</button>
             <button class="btn btn-ghost btn-stop" id="batchDelete" type="button">批量删除</button>
           </div>
         </div>

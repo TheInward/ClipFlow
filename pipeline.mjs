@@ -449,14 +449,14 @@ export function formatBytes(n) {
  * 火山 AI MediaKit 的视频增强工具 enhance-video：输入一个「云端能拉到的视频地址」，
  * 输出超清后的视频地址。失败时由调用方决定是否回退到原产物（这里只负责抛错）。
  */
-export async function enhanceVideo(videoUrl, { pollMs = 4000, timeoutMs = 60 * 60 * 1000, taskId = null, onSubmitted = () => {}, assertAlive = () => {}, resolution = null } = {}) {
+export async function enhanceVideo(videoUrl, { pollMs = 4000, timeoutMs = 60 * 60 * 1000, taskId = null, onSubmitted = () => {}, assertAlive = () => {}, resolution = null, toolVersion = null } = {}) {
   assertAlive();
   if (!taskId) {
     if (!process.env.AMK_API_KEY) throw new Error('未配置去字幕接口密钥（AMK_API_KEY）');
     const submit = await fetchJson(`${apiBase()}/tools/enhance-video`, {
       method: 'POST',
       headers: apiHeaders(),
-      body: JSON.stringify({ video_url: videoUrl, ...(resolution ? { resolution } : {}) }),
+      body: JSON.stringify({ video_url: videoUrl, ...(resolution ? { resolution } : {}), ...(toolVersion ? { tool_version: toolVersion } : {}) }),
     }, 30000);
     if (!submit.res.ok) throw new Error(`提交超清任务失败：HTTP ${submit.res.status}`);
     const body = unwrap(submit.json);

@@ -18,7 +18,7 @@ const el = {
   adminCodes: $('#adminCodes'), adminCopy: $('#adminCopy'), adminCopyRow: $('#adminCopyRow'), adminHint: $('#adminHint'),
   uploadCard: $('#uploadCard'), dropzone: $('#dropzone'), fileInput: $('#fileInput'),
   dropHint: $('#dropHint'), quota: $('#quota'),
-  erasePreset: $('#erasePreset'), eraseHint: $('#eraseHint'), modeRow: $('#modeRow'), resRow: $('#resRow'), resSelect: $('#resSelect'),
+  erasePreset: $('#erasePreset'), eraseHint: $('#eraseHint'), modeRow: $('#modeRow'), resRow: $('#resRow'), resSelect: $('#resSelect'), verSelect: $('#verSelect'), batchZip: $('#batchZip'),
   tabbar: $('#tabbar'), uploadCard: $('#uploadCard'), linkCard: $('#linkCard'), linkInputs: $('#linkInputs'), linkAdd: $('#linkAdd'),
   linkNotice: $('#linkNotice'), pageTitle: $('#pageTitle'), pageDesc: $('#pageDesc'),
   batchCard: $('#batchCard'), batchSub: $('#batchSub'), batchPill: $('#batchPill'), notice: $('#notice'),
@@ -1535,7 +1535,7 @@ el.dropzone.addEventListener('keydown', (e) => {
  *   · 链接去水印是单条任务：粘贴直链 → 服务端探测时长 → 调用云端擦除 → 下载
  * ========================================================================== */
 function tabPayload() {
-  if (state.tab === 'enhance') return { operation: 'enhance', resolution: el.resSelect?.value || '1080p' };
+  if (state.tab === 'enhance') return { operation: 'enhance', resolution: el.resSelect?.value || '1080p', toolVersion: el.verSelect?.value || 'standard' };
   return { operation: 'erase-subtitle', erasePreset: el.erasePreset?.value || 'standard' };
 }
 
@@ -1614,6 +1614,12 @@ async function addLinkBatch() {
 
 if (el.tabbar) el.tabbar.addEventListener('click', (e) => { const b = e.target.closest('.tab'); if (b) setTab(b.dataset.tab); });
 if (el.linkAdd) el.linkAdd.addEventListener('click', addLinkBatch);
+if (el.batchZip) el.batchZip.addEventListener('click', () => {
+  const done = viewRows().filter((r) => r.status === 'succeeded' || r.status === 'done');
+  if (!done.length) { toast('还没有已完成的产物可打包'); return; }
+  toast(`正在打包 ${done.length} 个产物…`);
+  window.location.href = `/api/batches/${state.batchId}/zip`;
+});
 if (el.linkInputs) el.linkInputs.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); addLinkBatch(); } });
 
 el.fileInput.addEventListener('change', () => { acceptFiles(el.fileInput.files); el.fileInput.value = ''; });

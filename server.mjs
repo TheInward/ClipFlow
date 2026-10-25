@@ -1088,6 +1088,7 @@ async function execute(task) {
       task.stageKey = 'fetch';
       task.progress = Math.max(Number(task.progress) || 0, 10);
       saveDb();
+      await fsp.mkdir(outDir, { recursive: true });
       const size = await probeVideoSize(srcPath);
       const px = (v, total) => Math.max(2, Math.min(total - 2, Math.round((Number(v) / 100) * total)));
       const x = px(optsR.x, size.width);

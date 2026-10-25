@@ -20,6 +20,7 @@ const el = {
   dropHint: $('#dropHint'), quota: $('#quota'),
   erasePreset: $('#erasePreset'), eraseHint: $('#eraseHint'), modeRow: $('#modeRow'), resRow: $('#resRow'), resSelect: $('#resSelect'), verSelect: $('#verSelect'), batchZip: $('#batchZip'),
   asrRow: $('#asrRow'), asrLang: $('#asrLang'), asrBurn: $('#asrBurn'), tcRow: $('#tcRow'), tcProfile: $('#tcProfile'),
+  moreRow: $('#moreRow'), moreOp: $('#moreOp'), moreMode: $('#moreMode'), moreMask: $('#moreMask'), moreStrength: $('#moreStrength'), moreBg: $('#moreBg'), moreHint: $('#moreHint'),
   tabbar: $('#tabbar'), uploadCard: $('#uploadCard'), linkCard: $('#linkCard'), linkInputs: $('#linkInputs'), linkAdd: $('#linkAdd'),
   linkNotice: $('#linkNotice'), pageTitle: $('#pageTitle'), pageDesc: $('#pageDesc'),
   batchCard: $('#batchCard'), batchSub: $('#batchSub'), batchPill: $('#batchPill'), notice: $('#notice'),
@@ -45,7 +46,7 @@ const state = {
   pollTimer: null,
   tickTimer: null,
   tab: 'erase',                       // erase | enhance | link
-  tabBatch: { erase: null, enhance: null, asr: null, transcode: null, link: null },
+  tabBatch: { erase: null, enhance: null, asr: null, transcode: null, more: null, link: null },
   linkTasks: [],                      // 链接去水印创建的任务
 };
 
@@ -1539,6 +1540,12 @@ function tabPayload() {
   if (state.tab === 'enhance') return { operation: 'enhance', resolution: el.resSelect?.value || '1080p', toolVersion: el.verSelect?.value || 'standard' };
   if (state.tab === 'asr') return { operation: 'asr-subtitles', options: { language: el.asrLang?.value || 'auto', burn: el.asrBurn?.checked === true } };
   if (state.tab === 'transcode') return { operation: 'transcode', options: { profile: el.tcProfile?.value || '1080p' } };
+  if (state.tab === 'more') {
+    const op = el.moreOp?.value || 'ocr-extract';
+    if (op === 'ocr-extract') return { operation: op, options: { mode: el.moreMode?.value || 'Subtitle' } };
+    if (op === 'face-blur') return { operation: op, options: { maskMode: el.moreMask?.value || 'mosaic', strength: el.moreStrength?.value || 'medium' } };
+    return { operation: op, options: { background: el.moreBg?.value || 'green' } };
+  }
   return { operation: 'erase-subtitle', erasePreset: el.erasePreset?.value || 'standard' };
 }
 
@@ -1546,6 +1553,7 @@ const TAB_META = {
   erase: { title: '批量去字幕', desc: '一次最多 30 个视频（单个不超过 100 MB）。勾选任务后用「批量开始 / 批量取消」，也可以单独控制每一条；点「预览」对比源视频与结果。' },
   asr: { title: '语音转字幕', desc: '识别视频里的语音，生成带时间戳的 SRT 字幕；可勾选「烧录成视频」直接得到带字幕的成片。按原片秒数计费。' },
   transcode: { title: '压缩转码', desc: '把视频转码压缩到平台适合的分辨率/编码（1080P / 720P / H.265），输出 MP4，便于上传与分发。按原片秒数计费。' },
+  more: { title: '更多工具', desc: '字幕文稿 / 人脸打码 / 人像抠图：一次上传，批量处理，结果可下载或打包。' },
   enhance: { title: '超清画质', desc: '把视频增强 / 超分到更清晰的画质（去噪、色彩、清晰度、超分）。按原片秒数计费，与分辨率档位无关。' },
   link: { title: '链接去水印', desc: '粘贴公网视频直链，直接调用云端处理，视频无需上传到本服务器；处理方式为全屏模式擦除文字与文字水印。' },
 };
@@ -1565,6 +1573,8 @@ async function setTab(tab) {
   if (el.resRow) el.resRow.hidden = tab !== 'enhance';
   if (el.asrRow) el.asrRow.hidden = tab !== 'asr';
   if (el.tcRow) el.tcRow.hidden = tab !== 'transcode';
+  if (el.moreRow) el.moreRow.hidden = tab !== 'more';
+  if (tab === 'more') syncMoreOptions();
   stopPolling();
   state.items = [];
   state.selected.clear();
@@ -1619,8 +1629,26 @@ async function addLinkBatch() {
   }
 }
 
+
+/** 更多工具：按处理类型显示对应选项 */
+function syncMoreOptions() {
+  const op = el.moreOp?.value || 'ocr-extract';
+  const show = (node, on) => { if (node) node.hidden = !on; };
+  show(el.moreMode, op === 'ocr-extract');
+  show(el.moreMask, op === 'face-blur');
+  show(el.moreStrength, op === 'face-blur');
+  show(el.moreBg, op === 'portrait-matte');
+  if (el.moreHint) {
+    el.moreHint.textContent = op === 'ocr-extract'
+      ? '识别画面里已烧录的硬字幕，导出带时间戳的 SRT 文稿；按原片秒数计费'
+      : op === 'face-blur'
+        ? '自动识别人脸并打码（马赛克/高斯模糊），适合隐私脱敏；按原片秒数计费'
+        : '抠出人物主体，输出纯色底视频（绿幕最方便后期换背景）；按原片秒数计费';
+  }
+}
 if (el.tabbar) el.tabbar.addEventListener('click', (e) => { const b = e.target.closest('.tab'); if (b) setTab(b.dataset.tab); });
 if (el.linkAdd) el.linkAdd.addEventListener('click', addLinkBatch);
+if (el.moreOp) el.moreOp.addEventListener('change', syncMoreOptions);
 if (el.batchZip) el.batchZip.addEventListener('click', () => {
   const done = viewRows().filter((r) => r.status === 'succeeded' || r.status === 'done');
   if (!done.length) { toast('还没有已完成的产物可打包'); return; }

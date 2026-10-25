@@ -19,7 +19,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
-import { enhanceVideo, runAsr, toSrt, runTranscode } from './pipeline.mjs';
+import { enhanceVideo, runAsr, toSrt, runTranscode, runOcr, runToolVideo } from './pipeline.mjs';
 import { ZipStream, streamRemote } from './zip.mjs';
 import { probeVideoDuration, probeAvailable } from './media.mjs';
 import { normalizePhone, findUserByPhone, createUser, checkPassword, publicUser, createUserSession, chargeSeconds, refundSeconds, createCodes, redeemCode, ensureAdmin, setPassword, touchSession } from './accounts.mjs';
@@ -271,6 +271,11 @@ const ENHANCE_VERSIONS = ['standard', 'professional'];
 const ASR_LANGUAGES = ['auto', 'cmn-Hans-CN', 'eng-US'];
 // 压缩转码预设
 const TRANSCODE_PROFILES = ['1080p', '720p', 'hevc'];
+// 更多工具：画面字幕 OCR / 人脸打码 / 人像抠图
+const OCR_MODES = ['Subtitle', 'Detailed'];
+const FACE_MASK_MODES = ['mosaic', 'blur'];
+const FACE_STRENGTHS = ['low', 'medium', 'high'];
+const MATTE_BACKGROUNDS = ['green', 'black', 'white'];
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -1072,6 +1077,56 @@ async function execute(task) {
     if (file && isFileExpired(file) && !resume) throw new Error(`源文件已过期（超过 ${ttlHours()} 小时）并被删除，请重新上传`);
     const srcPath = file ? path.join(DATA_DIR, file.storedPath) : null;
     const outDir = path.join(OUTPUT_DIR, task.id);
+
+    // ---- 更多工具：字幕文稿 / 人脸打码 / 人像抠图 ----
+    if (task.operation === 'ocr-extract' || task.operation === 'face-blur' || task.operation === 'portrait-matte') {
+      const assertAlive3 = () => { if (task.canceled) throw Object.assign(new Error('任务已取消'), { code: 'CANCELED' }); };
+      const opts3 = task.options || {};
+      const baseName3 = path.basename(file?.name || task.fileName, file?.ext || path.extname(task.fileName));
+      const srcUrl3 = publicFileUrl(file.id);
+      if (task.operation === 'ocr-extract') {
+        task.stage = '正在识别画面文字'; task.stageKey = 'cloud'; task.progress = Math.max(Number(task.progress) || 0, 10); saveDb();
+        console.log(`[ocr] 任务 ${task.id} 开始识别（${opts3.mode || 'Subtitle'}）`);
+        const ocr = await runOcr(srcUrl3, { mode: opts3.mode || 'Subtitle', taskId: task.remoteTaskId, assertAlive: assertAlive3,
+          onSubmitted: (id) => { task.remoteTaskId = id; saveDb(); } });
+        assertAlive3();
+        const srt3 = toSrt(ocr.subtitles);
+        await fsp.mkdir(outDir, { recursive: true });
+        await fsp.writeFile(path.join(outDir, 'subtitle.srt'), srt3, 'utf8');
+        finishTaskResult(task, { name: `${baseName3}-文稿.srt`, size: Buffer.byteLength(srt3), hasVideo: false, remote: false, srt: true });
+        console.log(`[ocr] 任务 ${task.id} 生成文稿（${ocr.subtitles.length} 条）`);
+        return;
+      }
+      const tool = task.operation === 'face-blur' ? 'face-blur-video' : 'matte-portrait-video';
+      const extra = task.operation === 'face-blur'
+        ? { mask_mode: opts3.maskMode || 'mosaic', mask_strength: opts3.strength || 'medium', upright_face_only: true }
+        : { format: 'MP4', background_color: opts3.background || 'green' };
+      task.stage = task.operation === 'face-blur' ? '正在识别人脸并打码' : '正在抠出人物';
+      task.stageKey = 'cloud';
+      task.progress = Math.max(Number(task.progress) || 0, 10);
+      saveDb();
+      console.log(`[${tool}] 任务 ${task.id} 开始（${JSON.stringify(extra)}，已扣 ${task.chargedCredits} 积分）`);
+      const out3 = await runToolVideo(tool, srcUrl3, extra, { taskId: task.remoteTaskId, assertAlive: assertAlive3,
+        onSubmitted: (id) => { task.remoteTaskId = id; saveDb(); } });
+      assertAlive3();
+      const kept3 = KEEP_ARTIFACT;
+      let size3 = out3.size || 0;
+      if (kept3) {
+        await fetchPool.run(async () => {
+          assertAlive3();
+          const response = await fetch(out3.url, { signal: AbortSignal.timeout(900000) });
+          if (!response.ok) throw new Error(`下载结果失败：HTTP ${response.status}`);
+          const dest = path.join(outDir, 'output.mp4');
+          await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(dest));
+          assertAlive3();
+          size3 = (await fsp.stat(dest)).size;
+        });
+      }
+      const suffix = task.operation === 'face-blur' ? '打码' : '抠像';
+      finishTaskResult(task, { name: `${baseName3}-${suffix}.mp4`, size: size3, hasVideo: true, remote: !kept3, remoteUrl: out3.url });
+      console.log(`[${tool}] 任务 ${task.id} 完成，用时 ${out3.elapsedSeconds}s，产物 ${formatBytes(size3)}`);
+      return;
+    }
 
     // ---- 语音转字幕 / 压缩转码（独立功能，同样直接用云端接口处理源文件） ----
     if (task.operation === 'asr-subtitles' || task.operation === 'transcode') {
@@ -2125,6 +2180,16 @@ const ROUTES = {
     } else if (operation === 'transcode') {
       options = { profile: String(options?.profile || '1080p') };
       if (!TRANSCODE_PROFILES.includes(options.profile)) return sendError(res, 400, `未知的压缩预设 ${options.profile}`, { allowed: TRANSCODE_PROFILES });
+    } else if (operation === 'ocr-extract') {
+      options = { mode: String(options?.mode || 'Subtitle') };
+      if (!OCR_MODES.includes(options.mode)) return sendError(res, 400, `未知的识别模式 ${options.mode}`, { allowed: OCR_MODES });
+    } else if (operation === 'face-blur') {
+      options = { maskMode: String(options?.maskMode || 'mosaic'), strength: String(options?.strength || 'medium') };
+      if (!FACE_MASK_MODES.includes(options.maskMode)) return sendError(res, 400, `未知的打码方式 ${options.maskMode}`, { allowed: FACE_MASK_MODES });
+      if (!FACE_STRENGTHS.includes(options.strength)) return sendError(res, 400, `未知的打码强度 ${options.strength}`, { allowed: FACE_STRENGTHS });
+    } else if (operation === 'portrait-matte') {
+      options = { background: String(options?.background || 'green') };
+      if (!MATTE_BACKGROUNDS.includes(options.background)) return sendError(res, 400, `未知的底色 ${options.background}`, { allowed: MATTE_BACKGROUNDS });
     } else {
       options = null;
     }

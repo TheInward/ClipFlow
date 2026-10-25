@@ -34,6 +34,12 @@ export const OPERATIONS = {
     mode: 'Subtitle',
     outputExt: '.srt',
   },
+  // 独立功能：画面字幕 OCR → 文稿
+  'ocr-extract': { id: 'ocr-extract', label: '字幕文稿', desc: '识别画面中已烧录的字幕，导出带时间戳的文稿', mode: 'Subtitle', outputExt: '.srt' },
+  // 独立功能：人脸打码
+  'face-blur': { id: 'face-blur', label: '人脸打码', desc: '自动识别人脸并打码（隐私脱敏）', mode: 'Subtitle', outputExt: '.mp4' },
+  // 独立功能：人像抠图（纯色背景）
+  'portrait-matte': { id: 'portrait-matte', label: '人像抠图', desc: '抠出人物主体，输出纯色底视频（便于后期换背景）', mode: 'Subtitle', outputExt: '.mp4' },
   // 独立功能：压缩 / 转码（平台规格适配）
   'transcode': {
     id: 'transcode',
@@ -524,7 +530,7 @@ async function remoteSize(url) {
 /* ------------------------------------------------------------ 语音转字幕
  * 提交 /tools/asr-subtitles → 轮询 → 返回带时间戳的字幕数组
  */
-export async function runAsr(videoUrl, { language = null, taskId = null, onSubmitted = () => {}, assertAlive = () => {}, pollMs = 3000, timeoutMs = 60 * 60 * 1000 } = {}) {
+export async function runAsr(videoUrl, { language = null, taskId = null, onSubmitted = () => {}, assertAlive = () => {}, pollMs = Number(process.env.AMK_POLL_MS) || 3000, timeoutMs = 60 * 60 * 1000 } = {}) {
   assertAlive();
   if (!taskId) {
     if (!process.env.AMK_API_KEY) throw new Error('未配置去字幕接口密钥（AMK_API_KEY）');
@@ -581,7 +587,7 @@ export function toSrt(subtitles) {
 /* ------------------------------------------------------------ 压缩 / 转码
  * 提交 /tools/transcode-video → 轮询 → 返回云端产物地址
  */
-export async function runTranscode(videoUrl, { profile = '1080p', taskId = null, onSubmitted = () => {}, assertAlive = () => {}, pollMs = 4000, timeoutMs = 2 * 60 * 60 * 1000 } = {}) {
+export async function runTranscode(videoUrl, { profile = '1080p', taskId = null, onSubmitted = () => {}, assertAlive = () => {}, pollMs = Number(process.env.AMK_POLL_MS) || 4000, timeoutMs = 2 * 60 * 60 * 1000 } = {}) {
   const PRESETS = {
     '1080p': { video: { codec: 'h264', scale_type: 1, scale_long: 1920, bitrate_mode: 'crf', bitrate_crf: 23 } },
     '720p': { video: { codec: 'h264', scale_type: 1, scale_long: 1280, bitrate_mode: 'crf', bitrate_crf: 26 } },
@@ -622,5 +628,84 @@ export async function runTranscode(videoUrl, { profile = '1080p', taskId = null,
     if (['failed', 'failure', 'error'].includes(status)) {
       throw new Error(`转码失败：${d.field(['error', 'message']) || status}`);
     }
+  }
+}
+
+/* ------------------------------------------------------------ 通用「视频 → 视频」工具
+ * 人脸打码 / 人像抠图等：提交工具 + 轮询 + 返回云端产物地址
+ */
+export async function runToolVideo(tool, videoUrl, extraBody = {}, { taskId = null, onSubmitted = () => {}, assertAlive = () => {}, pollMs = Number(process.env.AMK_POLL_MS) || 4000, timeoutMs = 2 * 60 * 60 * 1000 } = {}) {
+  assertAlive();
+  if (!taskId) {
+    if (!process.env.AMK_API_KEY) throw new Error('未配置去字幕接口密钥（AMK_API_KEY）');
+    const submit = await fetchJson(`${apiBase()}/tools/${tool}`, {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({ video_url: videoUrl, ...extraBody }),
+    }, 30000);
+    if (!submit.res.ok) throw new Error(`提交 ${tool} 失败：HTTP ${submit.res.status}`);
+    const body = unwrap(submit.json);
+    if (body.root.success === false) throw new Error(`${tool} 被拒绝：${body.root.error?.code || 'UnknownError'}`);
+    taskId = body.field(['task_id', 'taskId', 'id']);
+    if (!taskId) throw new Error(`${tool} 未返回 task_id`);
+    onSubmitted(taskId);
+    console.log(`[${tool}] 已提交 task_id=${taskId}`);
+  }
+  const started = Date.now();
+  for (;;) {
+    assertAlive();
+    if (Date.now() - started > timeoutMs) throw new Error(`${tool} 超时`);
+    await sleep(pollMs);
+    const r = await fetchJson(`${apiBase()}/tasks/${taskId}`, { headers: apiHeaders() }, 30000);
+    if (!r.res.ok) throw new Error(`查询 ${tool} 任务失败：HTTP ${r.res.status}`);
+    const d = unwrap(r.json);
+    const status = String(d.field(['status']) || '').toLowerCase();
+    if (['completed', 'succeeded', 'success'].includes(status)) {
+      const url = d.field(['result', 'video_url']);
+      if (!url) throw new Error(`${tool} 完成但没有产物地址`);
+      const size = await remoteSize(url);
+      return { url, size, duration: Number(d.field(['result', 'duration'])) || 0, taskId, elapsedSeconds: Math.round((Date.now() - started) / 1000) };
+    }
+    if (['failed', 'failure', 'error'].includes(status)) {
+      throw new Error(`${tool} 失败：${d.field(['error', 'message']) || status}`);
+    }
+  }
+}
+
+/* ------------------------------------------------------------ 画面字幕 OCR
+ * 识别画面里已烧录的硬字幕 → 返回带时间戳的字幕数组（与 ASR 输出结构一致）
+ */
+export async function runOcr(videoUrl, { mode = 'Subtitle', taskId = null, onSubmitted = () => {}, assertAlive = () => {}, pollMs = Number(process.env.AMK_POLL_MS) || 4000, timeoutMs = 2 * 60 * 60 * 1000 } = {}) {
+  assertAlive();
+  if (!taskId) {
+    if (!process.env.AMK_API_KEY) throw new Error('未配置去字幕接口密钥（AMK_API_KEY）');
+    const submit = await fetchJson(`${apiBase()}/tools/video-ocr`, {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({ video_url: videoUrl, mode }),
+    }, 30000);
+    if (!submit.res.ok) throw new Error(`提交 OCR 失败：HTTP ${submit.res.status}`);
+    const body = unwrap(submit.json);
+    if (body.root.success === false) throw new Error(`OCR 被拒绝：${body.root.error?.code || 'UnknownError'}`);
+    taskId = body.field(['task_id', 'taskId', 'id']);
+    if (!taskId) throw new Error('OCR 未返回 task_id');
+    onSubmitted(taskId);
+    console.log(`[ocr] 已提交 task_id=${taskId}`);
+  }
+  const started = Date.now();
+  for (;;) {
+    assertAlive();
+    if (Date.now() - started > timeoutMs) throw new Error('OCR 超时');
+    await sleep(pollMs);
+    const r = await fetchJson(`${apiBase()}/tasks/${taskId}`, { headers: apiHeaders() }, 30000);
+    if (!r.res.ok) throw new Error(`查询 OCR 任务失败：HTTP ${r.res.status}`);
+    const d = unwrap(r.json);
+    const status = String(d.field(['status']) || '').toLowerCase();
+    if (['completed', 'succeeded', 'success'].includes(status)) {
+      const items = Array.isArray(d.root?.result?.subtitles) ? d.root.result.subtitles : [];
+      if (!items.length) throw new Error('画面里没有识别到文字');
+      return { taskId, subtitles: items.map((s) => ({ start: Number(s.start_time ?? 0), end: Number(s.end_time ?? 0), text: String(s.subtitle_text ?? '') })), elapsedSeconds: Math.round((Date.now() - started) / 1000) };
+    }
+    if (['failed', 'failure', 'error'].includes(status)) throw new Error(`OCR 失败：${d.field(['error', 'message']) || status}`);
   }
 }

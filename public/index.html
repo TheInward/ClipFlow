@@ -64,6 +64,7 @@
         <button class="tab" type="button" data-tab="enhance" role="tab">超清画质</button>
         <button class="tab" type="button" data-tab="asr" role="tab">加字幕</button>
         <button class="tab" type="button" data-tab="transcode" role="tab">压缩转码</button>
+        <button class="tab" type="button" data-tab="more" role="tab">更多工具</button>
         <button class="tab" type="button" data-tab="link" role="tab">链接去水印</button>
       </nav>
       <div class="page-head">
@@ -116,6 +117,33 @@
             <option value="hevc">H.265 高压缩（体积最小）</option>
           </select>
           <span class="hint-inline">云端转码压缩，输出 MP4（最长 3 小时）；按原片秒数计费</span>
+        </div>
+        <div class="region-row" id="moreRow" hidden>
+          <label for="moreOp">处理类型</label>
+          <select id="moreOp">
+            <option value="ocr-extract" selected>字幕文稿（识别画面文字）</option>
+            <option value="face-blur">人脸打码（隐私脱敏）</option>
+            <option value="portrait-matte">人像抠图（纯色底）</option>
+          </select>
+          <select id="moreMode" hidden>
+            <option value="Subtitle" selected>只识别字幕</option>
+            <option value="Detailed">识别全部文字</option>
+          </select>
+          <select id="moreMask" hidden>
+            <option value="mosaic" selected>马赛克</option>
+            <option value="blur">高斯模糊</option>
+          </select>
+          <select id="moreStrength" hidden>
+            <option value="low">低强度</option>
+            <option value="medium" selected>中强度</option>
+            <option value="high">高强度</option>
+          </select>
+          <select id="moreBg" hidden>
+            <option value="green" selected>绿幕</option>
+            <option value="black">黑底</option>
+            <option value="white">白底</option>
+          </select>
+          <span class="hint-inline" id="moreHint">字幕文稿：识别画面里已烧录的字幕并导出 SRT；人脸打码：自动识别人脸并遮挡；人像抠图：抠出人物输出纯色底视频（便于后期换背景）。按原片秒数计费</span>
         </div>
         <div class="region-row" id="resRow" hidden>
           <label for="resSelect">目标分辨率</label>

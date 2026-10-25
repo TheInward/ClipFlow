@@ -914,3 +914,16 @@ body{background:var(--canvas)}
 .search2:focus{border-color:#b9b9c0;box-shadow:0 0 0 3px rgba(10,10,12,.05)}
 .a-acts{display:none}
 .asset:hover .a-acts{display:flex}
+
+/* ---------- 任务中心 ---------- */
+#taskList .row{display:flex;align-items:center;gap:14px;padding:14px 18px;border-top:1px solid var(--line-2)}
+#taskList .row:first-child{border-top:0}
+#taskList .row:hover{background:#fafafb}
+.task-ico{width:40px;height:40px;border-radius:12px;background:#f3f3f5;border:1px solid var(--line);display:grid;place-items:center;font-size:14px;color:#111}
+.task-main{flex:1;min-width:0}
+.task-name{font-size:13.5px;font-weight:550;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.task-meta{font-size:11.5px;color:var(--ink-3);margin-top:2px}
+.task-prog{height:4px;border-radius:99px;background:#ececef;margin-top:6px;max-width:240px;overflow:hidden}
+.task-prog i{display:block;height:100%;border-radius:99px;background:#111;transition:width .3s}
+.task-act{display:flex;gap:6px}
+.task-act .btn{height:30px;padding:0 11px;font-size:12px;border-radius:9px}

@@ -25,7 +25,8 @@ const el = {
   tabbar: $('#tabbar'), navMain: $('#navMain'), assetFilters: $('#assetFilters'), assetGrid: $('#assetGrid'),
   assetEmpty: $('#assetEmpty'), assetTotal: $('#assetTotal'), assetSearch: $('#assetSearch'), assetBulk: $('#assetBulk'),
   assetSelAll: $('#assetSelAll'), assetSelNote: $('#assetSelNote'), assetBulkDelete: $('#assetBulkDelete'),
-  studioSend: $('#studioSend'), studioNotice: $('#studioNotice'), plansRedeem: $('#plansRedeem'), uploadCard: $('#uploadCard'), linkCard: $('#linkCard'), linkInputs: $('#linkInputs'), linkAdd: $('#linkAdd'),
+  studioSend: $('#studioSend'), studioNotice: $('#studioNotice'), plansRedeem: $('#plansRedeem'),
+  taskFilters: $('#taskFilters'), taskList: $('#taskList'), taskEmpty: $('#taskEmpty'), taskTotal: $('#taskTotal'), uploadCard: $('#uploadCard'), linkCard: $('#linkCard'), linkInputs: $('#linkInputs'), linkAdd: $('#linkAdd'),
   linkNotice: $('#linkNotice'), pageTitle: $('#pageTitle'), pageDesc: $('#pageDesc'),
   batchCard: $('#batchCard'), batchSub: $('#batchSub'), batchPill: $('#batchPill'), notice: $('#notice'),
   diskWarn: $('#diskWarn'),
@@ -1733,7 +1734,7 @@ setInterval(refreshHeader, 10000);
 /* ============================================================================
  * 顶层页面：工具 / 创作 / 资产 / 积分
  * ========================================================================== */
-const PAGE_IDS = { home: 'pageHome', tools: 'pageTools', studio: 'pageStudio', assets: 'pageAssets', plans: 'pagePlans' };
+const PAGE_IDS = { home: 'pageHome', tools: 'pageTools', studio: 'pageStudio', assets: 'pageAssets', tasks: 'pageTasks', plans: 'pagePlans' };
 let currentPage = 'tools';
 let assetKind = 'all';
 let assetList = [];
@@ -1750,6 +1751,7 @@ function switchPage(page) {
   });
   if (page === 'assets') loadAssets();
   if (page === 'home') { loadAssets().then(renderHome).catch(() => renderHome()); }
+  if (page === 'tasks') loadTasks();
   if (page === 'studio' && el.studioNotice) {
     // 生成服务未接入时给出明确提示（不阻塞其它功能）
     el.studioNotice.hidden = false;
@@ -1950,3 +1952,121 @@ const homeGo = document.getElementById('homeCmdGo');
 if (homeGo) homeGo.addEventListener('click', () => goTool('erase'));
 const homeCmd = document.getElementById('homeCmd');
 if (homeCmd) homeCmd.addEventListener('keydown', (e) => { if (e.key === 'Enter') goTool('erase'); });
+
+/* ============================================================================
+ * 任务中心
+ * ========================================================================== */
+let taskFilter = 'all';
+let taskListData = [];
+let taskPollTimer = null;
+
+const TASK_FILTERS = [
+  ['all', '全部'], ['active', '进行中'], ['done', '已完成'], ['failed', '失败'],
+];
+function taskBucket(t) {
+  if (t.status === 'succeeded') return 'done';
+  if (['failed', 'canceled', 'expired'].includes(t.status)) return 'failed';
+  return 'active';
+}
+function taskStatusText(t) {
+  if (t.status === 'succeeded') return '已完成';
+  if (t.status === 'failed') return '失败';
+  if (t.status === 'canceled') return '已取消';
+  if (t.status === 'expired') return '已过期';
+  if (t.status === 'processing') return `处理中 ${t.progress || 0}%`;
+  return '排队中';
+}
+
+async function loadTasks() {
+  if (!el.taskList) return;
+  try {
+    const data = await jsonApi('/api/tasks');
+    taskListData = data.tasks || [];
+  } catch (err) {
+    taskListData = [];
+    toast(`任务加载失败：${err.message}`);
+  }
+  renderTaskFilters();
+  renderTasks();
+  // 有进行中的任务时每 3 秒刷新
+  clearInterval(taskPollTimer);
+  if (taskListData.some((t) => taskBucket(t) === 'active')) {
+    taskPollTimer = setInterval(async () => {
+      if (currentPage !== 'tasks') { clearInterval(taskPollTimer); return; }
+      try {
+        const data = await jsonApi('/api/tasks');
+        taskListData = data.tasks || [];
+        renderTasks();
+        if (!taskListData.some((t) => taskBucket(t) === 'active')) clearInterval(taskPollTimer);
+      } catch { /* 忽略 */ }
+    }, 3000);
+  }
+}
+
+function renderTaskFilters() {
+  if (!el.taskFilters) return;
+  el.taskFilters.innerHTML = TASK_FILTERS.map(([k, label]) => {
+    const n = k === 'all' ? taskListData.length : taskListData.filter((t) => taskBucket(t) === k).length;
+    return `<button class="cchip ${taskFilter === k ? 'on' : ''}" type="button" data-tkind="${k}">${label} <span class="cnt">${n}</span></button>`;
+  }).join('');
+}
+
+function renderTasks() {
+  if (!el.taskList) return;
+  const list = taskListData.filter((t) => taskFilter === 'all' || taskBucket(t) === taskFilter);
+  if (el.taskTotal) el.taskTotal.textContent = `共 ${list.length} 项`;
+  el.taskEmpty.hidden = list.length > 0;
+  el.taskList.innerHTML = '';
+  const ICON = { 'erase-subtitle': '字', enhance: '超', 'asr-subtitles': '文', transcode: '压', 'ocr-extract': '稿', 'face-blur': '码', 'portrait-matte': '抠', 'region-blur': '遮' };
+  for (const t of list) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const when = t.finishedAt || t.createdAt;
+    const meta = [t.operationLabel, t.durationSec ? `${Math.round(t.durationSec)} 秒` : '', t.chargedCredits ? `已扣 ${t.chargedCredits} 积分` : '',
+      when ? new Date(when).toLocaleString('zh-CN', { hour12: false }) : ''].filter(Boolean).join(' · ');
+    row.innerHTML = `
+      <div class="task-ico">${ICON[t.operation] || '▶'}</div>
+      <div class="task-main">
+        <div class="task-name">${escapeHtml(t.result?.name || t.fileName || t.id)}</div>
+        <div class="task-meta">${escapeHtml(meta)}${t.error ? ` · ${escapeHtml(t.error.slice(0, 60))}` : ''}</div>
+        ${taskBucket(t) === 'active' ? `<div class="task-prog"><i style="width:${t.progress || 0}%"></i></div>` : ''}
+      </div>
+      <span class="pill ${t.status === 'succeeded' ? 'ok' : t.status === 'failed' ? 'bad' : 'run'}">${taskStatusText(t)}</span>
+      <div class="task-act"></div>`;
+    const acts = row.querySelector('.task-act');
+    if (t.downloadUrl) {
+      const a = document.createElement('a');
+      a.className = 'btn btn-ghost'; a.href = t.downloadUrl; a.textContent = '下载'; a.download = '';
+      acts.appendChild(a);
+    }
+    if (taskBucket(t) === 'failed') {
+      const retry = document.createElement('button');
+      retry.className = 'btn btn-primary'; retry.type = 'button'; retry.textContent = '重试';
+      retry.addEventListener('click', async () => {
+        retry.disabled = true;
+        try { await jsonApi(`/api/tasks/${t.id}/start`, { method: 'POST', body: '{}' }); toast('已重新排队'); loadTasks(); }
+        catch (err) { toast(`重试失败：${err.message}`); retry.disabled = false; }
+      });
+      acts.appendChild(retry);
+    }
+    if (taskBucket(t) === 'active') {
+      const cancel = document.createElement('button');
+      cancel.className = 'btn btn-ghost btn-stop'; cancel.type = 'button'; cancel.textContent = '取消';
+      cancel.addEventListener('click', async () => {
+        try { await jsonApi(`/api/tasks/${t.id}`, { method: 'DELETE' }); toast('已取消并退款'); loadTasks(); }
+        catch (err) { toast(`取消失败：${err.message}`); }
+      });
+      acts.appendChild(cancel);
+    }
+    el.taskList.appendChild(row);
+  }
+}
+
+if (el.taskFilters) {
+  el.taskFilters.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-tkind]');
+    if (!b) return;
+    taskFilter = b.dataset.tkind;
+    renderTaskFilters(); renderTasks();
+  });
+}

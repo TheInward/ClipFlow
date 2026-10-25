@@ -64,6 +64,7 @@
         <button class="nav-pill" type="button" data-page="tools">工具</button>
         <button class="nav-pill" type="button" data-page="studio">创作</button>
         <button class="nav-pill" type="button" data-page="assets">资产</button>
+        <button class="nav-pill" type="button" data-page="tasks">任务</button>
         <button class="nav-pill" type="button" data-page="plans">积分</button>
       </nav>
       <!-- ===================== 首页 ===================== -->
@@ -355,6 +356,21 @@
         </div>
         <div class="asset-grid" id="assetGrid"></div>
         <div class="notice" id="assetEmpty" hidden>还没有资产：先在「工具」里上传并处理一个视频。</div>
+      </section>
+
+      <!-- ===================== 任务 ===================== -->
+      <section id="pageTasks" hidden>
+        <div class="page-head">
+          <p class="eyebrow">TASKS</p>
+          <h1>任务</h1>
+          <p>所有处理记录的实时状态，失败可重试，完成后可直接下载。</p>
+        </div>
+        <div class="asset-bar">
+          <div class="filters" id="taskFilters"></div>
+          <span class="asset-total" id="taskTotal">共 0 项</span>
+        </div>
+        <div class="list" id="taskList"></div>
+        <div class="notice" id="taskEmpty" hidden>还没有任务：去「工具」上传一个视频开始处理。</div>
       </section>
 
       <!-- ===================== 积分 ===================== -->

@@ -2584,6 +2584,27 @@ const ROUTES = {
     }
   },
 
+  /** 任务中心：当前用户的所有处理任务（含进行中/失败） */
+  'GET /api/tasks': async (req, res) => {
+    const me = currentUser(req);
+    if (!me) return sendError(res, 401, '请重新登录');
+    const list = Object.values(db.tasks || {})
+      .filter((t) => t.userId === me.id)
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+      .slice(0, 200)
+      .map((t) => ({
+        id: t.id, operation: t.operation, operationLabel: OPERATIONS[t.operation]?.label || t.operation,
+        status: t.status, progress: t.progress || 0, stage: t.stage || '', stageKey: t.stageKey || null,
+        fileName: t.fileName || '', durationSec: t.durationSec || null,
+        chargedCredits: t.chargedCredits || 0, error: t.error || null,
+        createdAt: t.createdAt, finishedAt: t.finishedAt || null,
+        result: t.result ? { name: t.result.name, size: t.result.size || 0, remote: !!t.result.remote, srt: !!t.result.srt } : null,
+        downloadUrl: t.status === 'succeeded' ? `/api/download/${t.id}` : null,
+        previewUrl: t.status === 'succeeded' && t.result?.hasVideo ? `/api/artifacts/${t.id}/video` : null,
+      }));
+    sendJson(res, 200, { tasks: list, total: list.length });
+  },
+
   /** 资产中心：当前用户上传的源文件 + 已完成的处理产物（统一列表） */
   'GET /api/assets': async (req, res) => {
     const me = currentUser(req);

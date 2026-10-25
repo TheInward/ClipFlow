@@ -115,7 +115,7 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
   await t.test('same bytes are not shared between users or different processing settings',async()=>{
     assert.notEqual(aId,bId);
     const strong=await batch(file,{erasePreset:'fullscreen'});
-    const enhanced=await batch(file,{enhance:true});
+    const enhanced=await batch(file,{operation:'enhance',resolution:'1080p'});
     assert.notEqual(aId,strong.items[0].taskId);assert.notEqual(aId,enhanced.items[0].taskId);
     assert.equal((await batch(file)).items[0].taskId,aId);
     assert.equal((await cancel(aId,'b')).status,404);
@@ -143,24 +143,25 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     await cancel(bId,'b');await sleep(1200);
     assert.equal(upstreamTasks.size,2);assert.equal((await task(aId)).status,'canceled');
   });
-  await t.test('enhancement remains processing until final result, then caches only matching settings',async()=>{
-    const e=await batch(file,{enhance:true});const id=e.items[0].taskId;
-    assert.equal((await start(id)).status,202);assert.equal(await credits(),92);
-    await until(()=>upstreamTasks.size===3);upstreamTasks.get('remote_3').state='completed';
-    await until(()=>upstreamTasks.size===4);
+  await t.test('enhancement is its own operation: single pass, 1x charge, resumes after restart',async()=>{
+    const e=await batch(file,{operation:'enhance',resolution:'1080p'});const id=e.items[0].taskId;
+    assert.equal((await start(id)).status,202);assert.equal(await credits(),96);   // 3.2 秒 → 4 积分（1 倍）
+    await until(()=>upstreamTasks.size===3);
     const mid=await task(id);assert.equal(mid.status,'processing');assert.equal(mid.stageKey,'enhance');assert.equal(mid.result,undefined);
     assert.equal((await api(`/api/download/${id}`)).status,409);
-    // Restart while enhancing: preserve the enhancement id and resume instead of submitting it again.
+    // 重启后凭已保存的云端任务号接管，不重复提交
     await sleep(150);
     child.kill('SIGTERM'); await once(child, 'exit');
     child = launch();
     await until(async()=>{try{return (await fetch(base+'/api/auth/session')).ok;}catch{return false;}});
     assert.equal((await task(id)).status, 'processing');
-    upstreamTasks.get('remote_4').state='completed';
+    upstreamTasks.get('remote_3').state='completed';
     await until(async()=>(await task(id)).status==='succeeded');
-    assert.equal(upstreamTasks.size,4);
+    assert.equal(upstreamTasks.size,3);
     const result=await api(`/api/download/${id}`);assert.equal(result.status,302);assert.match(result.headers.get('location'),/\/asset\/enhance$/);
-    assert.equal((await batch(file,{enhance:true})).items[0].taskId,id);
+    // 同参数复用；不同分辨率 / 去字幕不复用
+    assert.equal((await batch(file,{operation:'enhance',resolution:'1080p'})).items[0].taskId,id);
+    assert.notEqual((await batch(file,{operation:'enhance',resolution:'720p'})).items[0].taskId,id);
     assert.notEqual((await batch(file)).items[0].taskId,id);
   });
   await t.test('batch start charges each unique task once and reports insufficient balance', async () => {
@@ -179,10 +180,12 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     assert.equal(await credits(), before);
   });
   await t.test('single-file route charges the verified duration and assigns owner',async()=>{
+    const before=await credits();
     const r=await api(`/api/files/${file}/process`,{method:'POST',body:{durationSec:0.01}});
     assert.equal(r.status,202);assert.equal(r.data.task.userId,'a');assert.equal(r.data.task.chargedCredits,4);
+    assert.equal(await credits(),before-4);
     await cancel(r.data.task.id);
-    assert.equal(await credits(),92);
+    assert.equal(await credits(),before);   // 取消立即退款
   });
 });
 

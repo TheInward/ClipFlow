@@ -59,9 +59,14 @@
     </header>
 
     <main class="container">
+      <nav class="tabbar" id="tabbar" role="tablist">
+        <button class="tab is-active" type="button" data-tab="erase" role="tab">去字幕</button>
+        <button class="tab" type="button" data-tab="enhance" role="tab">超清画质</button>
+        <button class="tab" type="button" data-tab="link" role="tab">链接去水印</button>
+      </nav>
       <div class="page-head">
-        <h1>批量去字幕</h1>
-        <p>一次最多 30 个视频（单个不超过 100 MB）；勾选任务后用「批量开始 / 批量取消」，也可以单独控制每一条；点「预览」展开源视频与目标视频对比。</p>
+        <h1 id="pageTitle">批量去字幕</h1>
+        <p id="pageDesc">一次最多 30 个视频（单个不超过 100 MB）；勾选任务后用「批量开始 / 批量取消」，也可以单独控制每一条；点「预览」展开源视频与目标视频对比。</p>
       </div>
 
       <!-- ===================== 添加视频 ===================== -->
@@ -74,25 +79,30 @@
           <span class="pill" id="quota">0 / 10</span>
         </div>
         <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="选择视频文件">
-            <input id="fileInput" class="file-input" type="file" accept="video/*,.mkv,.ts,.flv,.wmv,.m4v" multiple />
+            <input id="fileInput" class="file-input" type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/x-msvideo,video/x-flv,video/mp2t,video/x-ms-wmv,.mp4,.mov,.mkv,.avi,.flv,.ts,.wmv" multiple />
           <div class="up-icon" aria-hidden="true">↑</div>
           <strong>拖拽视频到这里，或点击选择</strong>
           <div class="hint" id="dropHint">正在读取支持格式…</div>
         </div>
         <!-- 擦除区域：字幕不在画面下方时（比如在上半部），默认区域可能漏擦 -->
-                  <div class="region-row">
-            <label for="erasePreset">处理模式</label>
-            <select id="erasePreset">
-              <option value="standard" selected>标准模式（默认）</option>
-              <option value="fullscreen">全屏模式（更彻底，耗时约 3 倍）</option>
-            </select>
-            <span class="hint-inline" id="eraseHint">标准模式：识别常规字幕（快）；全屏模式：擦画面任何位置的文字与文字水印（含画面上部字幕、移动文字水印），耗时明显更长</span>
-            <label class="chk-inline" for="enhanceToggle">
-              <input id="enhanceToggle" type="checkbox" />
-              <span>超清画质</span>
-            </label>
-            <span class="hint-inline" id="enhanceHint"></span>
-          </div>
+        <div class="region-row" id="modeRow">
+          <label for="erasePreset">处理模式</label>
+          <select id="erasePreset">
+            <option value="standard" selected>标准模式（默认）</option>
+            <option value="fullscreen">全屏模式（更彻底，耗时约 3 倍）</option>
+          </select>
+          <span class="hint-inline" id="eraseHint">标准模式：识别常规字幕（快）；全屏模式：擦画面任何位置的文字与文字水印，耗时明显更长</span>
+        </div>
+        <div class="region-row" id="resRow" hidden>
+          <label for="resSelect">目标分辨率</label>
+          <select id="resSelect">
+            <option value="720p">720p（快）</option>
+            <option value="1080p" selected>1080p（推荐）</option>
+            <option value="2k">2K</option>
+            <option value="4k">4K（最慢）</option>
+          </select>
+          <span class="hint-inline">超分到指定分辨率；输入最高支持 2K，耗时随档位上升（按原片秒数计费，与档位无关）</span>
+        </div>
         <div class="notice notice-danger" id="diskWarn" hidden></div>
       </section>
 
@@ -135,6 +145,22 @@
         </div>
 
         <div class="list" id="list"></div>
+      </section>
+      <!-- ===================== 链接去水印 ===================== -->
+      <section class="card" id="linkCard" hidden>
+        <div class="card-head">
+          <div>
+            <h2>粘贴视频链接</h2>
+            <p class="muted">支持公网视频直链（.mp4 / .mov / .mkv / .avi / .flv / .ts / .wmv），视频无需上传到本服务器。</p>
+          </div>
+        </div>
+        <div class="url-row">
+          <input id="linkInput" class="url-input" type="url" inputmode="url" placeholder="https://example.com/video.mp4" autocomplete="off" />
+          <button class="btn btn-primary" id="linkStart" type="button">开始处理</button>
+        </div>
+        <div class="hint" id="linkHint">处理方式：全屏模式擦除画面中的文字与文字水印；抖音/快手等分享短链暂不支持（页面由 JS 动态生成地址），请先保存视频后到「去字幕」上传。</div>
+        <div class="notice notice-danger" id="linkNotice" hidden></div>
+        <div class="list" id="linkList"></div>
       </section>
     </main>
 

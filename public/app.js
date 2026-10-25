@@ -18,7 +18,9 @@ const el = {
   adminCodes: $('#adminCodes'), adminCopy: $('#adminCopy'), adminCopyRow: $('#adminCopyRow'), adminHint: $('#adminHint'),
   uploadCard: $('#uploadCard'), dropzone: $('#dropzone'), fileInput: $('#fileInput'),
   dropHint: $('#dropHint'), quota: $('#quota'),
-  erasePreset: $('#erasePreset'), enhanceToggle: $('#enhanceToggle'), enhanceHint: $('#enhanceHint'), eraseHint: $('#eraseHint'),
+  erasePreset: $('#erasePreset'), eraseHint: $('#eraseHint'), modeRow: $('#modeRow'), resRow: $('#resRow'), resSelect: $('#resSelect'),
+  tabbar: $('#tabbar'), uploadCard: $('#uploadCard'), linkCard: $('#linkCard'), linkInput: $('#linkInput'), linkStart: $('#linkStart'),
+  linkNotice: $('#linkNotice'), linkList: $('#linkList'), pageTitle: $('#pageTitle'), pageDesc: $('#pageDesc'),
   batchCard: $('#batchCard'), batchSub: $('#batchSub'), batchPill: $('#batchPill'), notice: $('#notice'),
   diskWarn: $('#diskWarn'),
   bigDone: $('#bigDone'), cDone: $('#cDone'), cRun: $('#cRun'), cUp: $('#cUp'),
@@ -41,6 +43,9 @@ const state = {
   selected: new Set(),// 勾选的任务（批量开始/批量取消只针对它们）
   pollTimer: null,
   tickTimer: null,
+  tab: 'erase',                       // erase | enhance | link
+  tabBatch: { erase: null, enhance: null },
+  linkTasks: [],                      // 链接去水印创建的任务
 };
 
 const STORE_KEY = 'clipflow.batchId';
@@ -479,8 +484,8 @@ async function ensureBatch() {
   try {
     const data = state.batchId
       // 已有批次 → 追加（分批添加）
-      ? await jsonApi(`/api/batches/${state.batchId}/items`, { method: 'POST', timeoutMs: 600000, body: JSON.stringify({ fileIds, durations, erasePreset: el.erasePreset?.value || 'standard', enhance: el.enhanceToggle?.checked === true }) })
-      : await jsonApi('/api/batches', { method: 'POST', timeoutMs: 600000, body: JSON.stringify({ fileIds, operation: 'erase-subtitle', durations, erasePreset: el.erasePreset?.value || 'standard', enhance: el.enhanceToggle?.checked === true }) });
+      ? await jsonApi(`/api/batches/${state.batchId}/items`, { method: 'POST', timeoutMs: 600000, body: JSON.stringify({ fileIds, durations, ...tabPayload() }) })
+      : await jsonApi('/api/batches', { method: 'POST', timeoutMs: 600000, body: JSON.stringify({ fileIds, durations, ...tabPayload() }) });
     if (!state.batchId) {
       state.batchId = data.batch.id;
       try { localStorage.setItem(STORE_KEY, state.batchId); } catch { /* 忽略 */ }
@@ -680,7 +685,7 @@ function renderNow() {
     if (state.openKey === r.key) el.list.appendChild(panelNode(r));
   });
   pruneSelection(rows);
-  try { syncEnhance(); } catch { /* 忽略 */ }
+  /* 超清已独立为标签页，不再有「处理模式 + 超清」组合 */
   renderSummary(rows);
   renderDiskWarn();
   renderBatchButtons(rows);
@@ -1316,25 +1321,7 @@ async function restore() {
 
   /** 页头积分徽标（点击输入卡密充值） */
   
-/** 超清可用性：积分不足以覆盖 2 倍秒数时，自动取消勾选并禁用 + 提示充值 */
-function syncEnhance() {
-  const box = el.enhanceToggle;
-  if (!box) return;
-  const u = state.session?.user;
-  if (!u) return;
-  const privileged = u.role === 'admin' || u.whitelisted;
-  let need = 0;
-  try { need = viewRows().reduce((sum, r) => sum + Math.max(1, Math.ceil(Number(r.durationSec) || 0)), 0); } catch { need = 0; }
-  const enough = privileged || (u.credits || 0) >= need * 2;
-  if (!enough && need > 0 && box.checked) {
-    box.checked = false;
-    toast('积分不足以覆盖超清，已自动取消勾选');
-  }
-  box.disabled = !enough && need > 0;
-  if (el.enhanceHint) {
-    el.enhanceHint.textContent = !enough && need > 0 ? `积分不足（超清需 ${need * 2}，当前 ${u.credits || 0}），请先充值` : '';
-  }
-}
+
 
 function renderCredits() {
     const u = state.session?.user;
@@ -1542,6 +1529,145 @@ el.erasePreset?.addEventListener('change', async () => {
 el.dropzone.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.fileInput.click(); }
 });
+/* ============================================================================
+ * 功能标签：去字幕 / 超清画质 / 链接去水印
+ *   · 去字幕、超清画质共用「上传 + 批次列表」这套 UI，只是 operation 不同
+ *   · 链接去水印是单条任务：粘贴直链 → 服务端探测时长 → 调用云端擦除 → 下载
+ * ========================================================================== */
+function tabPayload() {
+  if (state.tab === 'enhance') return { operation: 'enhance', resolution: el.resSelect?.value || '1080p' };
+  return { operation: 'erase-subtitle', erasePreset: el.erasePreset?.value || 'standard' };
+}
+
+const TAB_META = {
+  erase: { title: '批量去字幕', desc: '一次最多 30 个视频（单个不超过 100 MB）。勾选任务后用「批量开始 / 批量取消」，也可以单独控制每一条；点「预览」对比源视频与结果。' },
+  enhance: { title: '超清画质', desc: '把视频增强 / 超分到更清晰的画质（去噪、色彩、清晰度、超分）。按原片秒数计费，与分辨率档位无关。' },
+  link: { title: '链接去水印', desc: '粘贴公网视频直链，直接调用云端处理，视频无需上传到本服务器；处理方式为全屏模式擦除文字与文字水印。' },
+};
+
+async function setTab(tab) {
+  if (!TAB_META[tab] || tab === state.tab) return;
+  state.tabBatch[state.tab] = state.batchId;
+  state.tab = tab;
+  [...el.tabbar.querySelectorAll('.tab')].forEach((b) => b.classList.toggle('is-active', b.dataset.tab === tab));
+  const meta = TAB_META[tab];
+  if (el.pageTitle) el.pageTitle.textContent = meta.title;
+  if (el.pageDesc) el.pageDesc.textContent = meta.desc;
+  const isLink = tab === 'link';
+  if (el.uploadCard) el.uploadCard.hidden = isLink;
+  if (el.linkCard) el.linkCard.hidden = !isLink;
+  if (el.modeRow) el.modeRow.hidden = tab === 'enhance';
+  if (el.resRow) el.resRow.hidden = tab !== 'enhance';
+  stopPolling();
+  state.items = [];
+  state.selected.clear();
+  state.openKey = null;
+  state.batchId = state.tabBatch[tab] || null;
+  state.batch = null;
+  state.rows = [];
+  if (el.batchCard) el.batchCard.hidden = isLink || !state.batchId;
+  if (!isLink && state.batchId) {
+    try { applyBatch(await jsonApi(`/api/batches/${state.batchId}`)); startPolling(); }
+    catch { state.batchId = null; clearSaved(); }
+  }
+  render();
+  if (isLink) renderLinkTasks();
+}
+
+/* ------------------------------- 链接去水印 ------------------------------- */
+const LINK_STATUS = { pending: '排队中', processing: '处理中', succeeded: '已完成', failed: '失败', canceled: '已取消' };
+
+function renderLinkTasks() {
+  if (!el.linkList) return;
+  el.linkList.innerHTML = '';
+  if (!state.linkTasks.length) {
+    const empty = document.createElement('div');
+    empty.className = 'hint';
+    empty.textContent = '还没有任务：粘贴链接后点「开始处理」。';
+    el.linkList.appendChild(empty);
+    return;
+  }
+  for (const t of state.linkTasks) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const info = document.createElement('div');
+    info.className = 'row-main';
+    const name = document.createElement('div');
+    name.className = 'row-name';
+    name.textContent = t.fileName || t.sourceUrl || '（链接任务）';
+    const meta = document.createElement('div');
+    meta.className = 'row-meta';
+    const pct = t.status === 'processing' ? ` ${t.progress || 0}%` : '';
+    meta.textContent = `${LINK_STATUS[t.status] || t.status}${pct}${t.error ? ` · ${t.error}` : ''}`;
+    info.append(name, meta);
+    row.appendChild(info);
+    const actions = document.createElement('div');
+    actions.className = 'row-actions';
+    if (t.status === 'succeeded') {
+      const a = document.createElement('a');
+      a.className = 'btn btn-primary';
+      a.href = `/api/download/${t.id}`;
+      a.textContent = '下载';
+      actions.appendChild(a);
+    }
+    if (t.status === 'pending' || t.status === 'processing') {
+      const b = document.createElement('button');
+      b.className = 'btn btn-ghost btn-stop';
+      b.type = 'button';
+      b.textContent = '取消';
+      b.addEventListener('click', async () => {
+        try { await jsonApi(`/api/tasks/${t.id}`, { method: 'DELETE' }); toast('已取消'); }
+        catch (err) { toast(`取消失败：${err.message}`); }
+      });
+      actions.appendChild(b);
+    }
+    row.appendChild(actions);
+    el.linkList.appendChild(row);
+  }
+}
+
+let linkPollTimer = null;
+function startLinkPolling() {
+  clearInterval(linkPollTimer);
+  linkPollTimer = setInterval(async () => {
+    const active = state.linkTasks.filter((t) => t.status === 'pending' || t.status === 'processing');
+    if (!active.length) { clearInterval(linkPollTimer); linkPollTimer = null; return; }
+    await Promise.all(active.map(async (t) => {
+      try {
+        const res = await jsonApi(`/api/tasks/${t.id}`);
+        Object.assign(t, res.task || {});
+      } catch { /* 忽略单条失败 */ }
+    }));
+    renderLinkTasks();
+  }, 2500);
+}
+
+async function startLinkTask() {
+  const url = String(el.linkInput?.value || '').trim();
+  if (el.linkNotice) el.linkNotice.hidden = true;
+  if (!/^https?:\/\/\S+$/i.test(url)) {
+    if (el.linkNotice) { el.linkNotice.textContent = '请输入以 http:// 或 https:// 开头的视频直链'; el.linkNotice.hidden = false; }
+    return;
+  }
+  if (!markBusy(el.linkStart, '正在提交…')) return;
+  try {
+    const res = await jsonApi('/api/tasks/from-url', { method: 'POST', timeoutMs: 120000, body: JSON.stringify({ url }) });
+    el.linkInput.value = '';
+    state.linkTasks.unshift(res.task);
+    renderLinkTasks();
+    startLinkPolling();
+    toast('已提交处理');
+  } catch (err) {
+    if (el.linkNotice) { el.linkNotice.textContent = `处理失败：${err.message}`; el.linkNotice.hidden = false; }
+  } finally {
+    clearBusy(el.linkStart);
+  }
+}
+
+if (el.tabbar) el.tabbar.addEventListener('click', (e) => { const b = e.target.closest('.tab'); if (b) setTab(b.dataset.tab); });
+if (el.linkStart) el.linkStart.addEventListener('click', startLinkTask);
+if (el.linkInput) el.linkInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); startLinkTask(); } });
+
 el.fileInput.addEventListener('change', () => { acceptFiles(el.fileInput.files); el.fileInput.value = ''; });
 ['dragenter', 'dragover'].forEach((ev) => el.dropzone.addEventListener(ev, (e) => { e.preventDefault(); el.dropzone.classList.add('is-drag'); }));
 ['dragleave', 'drop'].forEach((ev) => el.dropzone.addEventListener(ev, (e) => { e.preventDefault(); el.dropzone.classList.remove('is-drag'); }));
@@ -1595,7 +1721,7 @@ async function refreshHeader() {
     badge.textContent = `积分 ${u.credits} · 充值`;
     if (el.adminBtn) el.adminBtn.hidden = u.role !== 'admin';
     if (el.sessionLeft) el.sessionLeft.textContent = fmtCountdown(sessionEndsAt - Date.now());
-    try { syncEnhance(); } catch { /* 忽略 */ }
+    /* 超清已独立为标签页 */
   } catch { /* 忽略 */ }
 }
 

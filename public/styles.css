@@ -703,3 +703,17 @@ main.container { padding-bottom: 64px; }
 /* 行内复选框（超清画质） */
 .chk-inline { display: inline-flex; align-items: center; gap: 6px; margin-left: 14px; font-size: 13px; color: var(--ink-2); cursor: pointer; }
 .chk-inline input { width: 15px; height: 15px; accent-color: var(--link); cursor: pointer; }
+
+/* ============================ 功能标签（去字幕 / 超清 / 链接去水印） */
+.tabbar { display: flex; gap: 4px; margin: 6px 0 20px; border-bottom: 1px solid var(--line); }
+.tab { appearance: none; border: 0; background: transparent; padding: 11px 20px; font-size: 15px; font-family: inherit;
+  color: var(--ink-2); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color .15s, border-color .15s; }
+.tab:hover { color: var(--ink); }
+.tab.is-active { color: var(--link); border-bottom-color: var(--link); font-weight: 600; }
+
+/* 链接去水印输入行 */
+.url-row { display: flex; gap: 10px; margin: 4px 0 10px; }
+.url-input { flex: 1; min-width: 0; padding: 11px 14px; border: 1px solid var(--line); border-radius: 10px;
+  font-size: 14px; font-family: inherit; background: #fff; color: var(--ink); }
+.url-input:focus { outline: none; border-color: var(--link); box-shadow: 0 0 0 3px var(--link-soft); }
+@media (max-width: 640px) { .url-row { flex-direction: column; } .tab { padding: 10px 12px; font-size: 14px; } }

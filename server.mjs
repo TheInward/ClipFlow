@@ -260,7 +260,10 @@ const SESSION_COOKIE = 'clp_sid';
 const LOGIN_MAX_FAILS = Math.max(3, Number(process.env.LOGIN_MAX_FAILS || 10));
 const LOGIN_WINDOW_MS = Math.max(1000, Number(process.env.LOGIN_WINDOW_MS || 10 * 60 * 1000));
 
-const VIDEO_EXT = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v', '.flv', '.wmv', '.mpeg', '.mpg', '.ts']);
+// AI MediaKit 去字幕/超清官方支持：mp4 / flv / ts / avi / mov / wmv / mkv（其余格式一律拒收）
+const VIDEO_EXT = new Set(['.mp4', '.mov', '.mkv', '.avi', '.flv', '.ts', '.wmv']);
+// 超清（enhance-video）支持的目标分辨率档位
+const ENHANCE_RESOLUTIONS = ['720p', '1080p', '2k', '4k'];
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -1058,10 +1061,58 @@ async function execute(task) {
   saveDb();
 
   try {
-    if (!file && !resume) throw new Error('源文件不存在或已被清理');
+    if (!file && !resume && !task.sourceUrl) throw new Error('源文件不存在或已被清理');
     if (file && isFileExpired(file) && !resume) throw new Error(`源文件已过期（超过 ${ttlHours()} 小时）并被删除，请重新上传`);
     const srcPath = file ? path.join(DATA_DIR, file.storedPath) : null;
     const outDir = path.join(OUTPUT_DIR, task.id);
+
+    // ---- 超清画质（独立功能）：直接把源文件交给云端画质增强接口，不经过擦除 ----
+    if (task.operation === 'enhance') {
+      task.stage = '正在增强画质';
+      task.stageKey = 'enhance';
+      task.progress = Math.max(Number(task.progress) || 0, 5);
+      saveDb();
+      const assertAlive = () => { if (task.canceled) throw Object.assign(new Error('任务已取消'), { code: 'CANCELED' }); };
+      console.log(`[enhance] 任务 ${task.id} 开始超清（${task.resolution || '自动'}，原片 ${task.durationSec || '?'}s，已扣 ${task.chargedCredits} 积分）`);
+      const enh = await enhanceVideo(publicFileUrl(file.id), {
+        taskId: task.remoteTaskId, assertAlive, resolution: task.resolution || null,
+        onSubmitted: (id) => { task.remoteTaskId = id; saveDb(); },
+      });
+      assertAlive();
+      const keptEnh = KEEP_ARTIFACT;
+      let size = enh.size || 0;
+      if (keptEnh) {
+        await fetchPool.run(async () => {
+          assertAlive();
+          const response = await fetch(enh.url, { signal: AbortSignal.timeout(900000) });
+          if (!response.ok) throw new Error(`下载超清结果失败：HTTP ${response.status}`);
+          const dest = path.join(outDir, 'output.mp4');
+          await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(dest));
+          assertAlive();
+          size = (await fsp.stat(dest)).size;
+        });
+      }
+      if (task.canceled) return;
+      task.result = {
+        name: `${path.basename(file?.name || task.fileName, file?.ext || path.extname(task.fileName))}-超清.mp4`,
+        size, hasVideo: true, poster: true, remote: !keptEnh,
+      };
+      task.remoteResultUrl = keptEnh ? null : enh.url;
+      task.remoteExpiresAt = keptEnh ? null : urlExpiry(enh.url);
+      task.enhanceDone = true;
+      task.status = 'succeeded';
+      task.progress = 100;
+      task.stage = '超清完成';
+      task.stageKey = 'done';
+      task.finishedAt = new Date().toISOString();
+      task.elapsedSeconds = Math.round((Date.parse(task.finishedAt) - Date.parse(task.startedAt)) / 1000);
+      task.etaSeconds = 0;
+      saveDb();
+      rememberResult(task);
+      console.log(`[worker] ${task.id} 超清完成，用时 ${enh.elapsedSeconds}s，产物 ${formatBytes(size)}${keptEnh ? '' : '（云端保存）'}`);
+      return;
+    }
+
     const outcome = await runPipeline(
       task,
       {
@@ -1076,7 +1127,7 @@ async function execute(task) {
         // 接管时源文件可能已被清理，用任务里保存的元信息兜底（只用于产物命名与封面）
         file: file || { name: task.fileName || 'video.mp4', ext: path.extname(task.fileName || '.mp4'), size: task.fileSize || 0 },
         // 云端引擎需要「云端能拉到的地址」；/f/<id> 是不可猜测的能力 URL，可匿名访问
-        videoUrl: file ? publicFileUrl(file.id) : null,
+        videoUrl: file ? publicFileUrl(file.id) : (task.sourceUrl || null),
         resume,
         // 两阶段闸门：提交可并发、回传限流
         gate: {
@@ -1094,7 +1145,7 @@ async function execute(task) {
       },
       ({ progress, stage, stageKey, etaSeconds, elapsedSeconds }) => {
         if (task.canceled) return;
-        progress = Math.min(task.enhance ? 94 : 99, Number(progress) || 0);
+        progress = Math.min(99, Number(progress) || 0);
         // 进度只增不减：接管任务时避免进度条回退
         task.progress = Math.max(Number(task.progress) || 0, Number(progress) || 0);
         task.stage = stage;
@@ -1114,47 +1165,10 @@ async function execute(task) {
     delete task.resume;
     let finalRemoteUrl = outcome.remoteUrl || null;
     let finalSize = kept ? stat.size : (outcome.size || 0);
-    let enhanced = false;
     const assertAlive = () => { if (task.canceled) throw Object.assign(new Error('任务已取消'), { code: 'CANCELED' }); };
-    if (task.enhance && finalRemoteUrl) {
-      task.stage = '正在增强画质';
-      task.stageKey = 'enhance';
-      saveDb();
-      try {
-        console.log(`[enhance] 任务 ${task.id} 开始超清（原片 ${task.durationSec || '?'}s，已扣 ${task.chargedCredits} 积分）`);
-        const enh = await enhanceVideo(finalRemoteUrl, { taskId: task.enhanceTaskId, assertAlive,
-          onSubmitted: (id) => { task.enhanceTaskId = id; saveDb(); } });
-        assertAlive();
-        if (enh && enh.url) {
-          finalRemoteUrl = enh.url;
-          finalSize = enh.size || finalSize;
-          if (kept) {
-            await fetchPool.run(async () => {
-              assertAlive();
-              const response = await fetch(enh.url, { signal: AbortSignal.timeout(600000) });
-              if (!response.ok) throw new Error(`下载超清结果失败：HTTP ${response.status}`);
-              const temp = outcome.outputs.video + '.enhanced';
-              try {
-                await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(temp));
-                assertAlive();
-                await fsp.rename(temp, outcome.outputs.video);
-                finalSize = (await fsp.stat(outcome.outputs.video)).size;
-              } finally { await fsp.rm(temp, { force: true }); }
-            });
-          }
-          enhanced = true;
-          console.log(`[enhance] 任务 ${task.id} 超清完成（用时 ${enh.elapsedSeconds}s）`);
-        }
-      } catch (err) {
-        if (err.code === 'CANCELED') throw err;
-        finalRemoteUrl = outcome.remoteUrl;
-        finalSize = kept ? stat.size : (outcome.size || 0);
-        console.warn(`[enhance] 任务 ${task.id} 超清失败，回退到去字幕结果（积分不退还）：${err.message}`);
-      }
-    }
     assertAlive();
     task.result = {
-      name: `${path.basename(file?.name || task.fileName, file?.ext || path.extname(task.fileName))}-无字幕${enhanced ? '-超清' : ''}${op.outputExt}`,
+      name: `${path.basename(file?.name || task.fileName, file?.ext || path.extname(task.fileName))}-无字幕${op.outputExt}`,
       size: finalSize,
       hasVideo: true,
       poster: true,
@@ -1164,10 +1178,9 @@ async function execute(task) {
       task.remoteResultUrl = finalRemoteUrl;
       task.remoteExpiresAt = urlExpiry(finalRemoteUrl);
     }
-    task.enhanceDone = enhanced;
     task.status = 'succeeded';
     task.progress = 100;
-    task.stage = enhanced ? '去字幕与超清完成' : '去字幕完成';
+    task.stage = '去字幕完成';
     task.stageKey = 'done';
     task.finishedAt = new Date().toISOString();
     task.elapsedSeconds = Math.round((Date.parse(task.finishedAt) - Date.parse(task.startedAt)) / 1000);
@@ -1305,7 +1318,10 @@ function assertFileAccess(file, user) {
 async function startTask(task, user, { force = false } = {}) {
   assertTaskOwner(task, user);
   const initialStatus = task.status;
-  const duration = await fileDuration(db.files[task.fileId]);
+  const duration = task.fileId
+    ? await fileDuration(db.files[task.fileId])
+    : Math.max(0, Number(task.durationSec) || 0);
+  if (!duration) throw Object.assign(new Error('无法确定视频时长，请改用上传处理'), { status: 422 });
   assertTaskOwner(task, user);
   if (db.tasks[task.id] !== task || task.status !== initialStatus) throw Object.assign(new Error('任务状态已变化，请重试'), { status: 409 });
   if (executing.has(task.id) || task.status === 'processing') throw Object.assign(new Error('任务正在处理或停止中'), { status: 409 });
@@ -1316,7 +1332,7 @@ async function startTask(task, user, { force = false } = {}) {
   task.durationSec = duration;
   // A completed run has consumed its charge. A forced new run pays again.
   if (task.status === 'succeeded' || !task.chargedCredits) {
-    const cr = chargeSeconds(db, user, Math.ceil(duration) * (task.enhance ? 2 : 1), task.id);
+    const cr = chargeSeconds(db, user, Math.ceil(duration), task.id);
     if (!cr.ok) throw Object.assign(new Error(`积分不足：需要 ${cr.need}，当前 ${cr.have}`), { status: 402, need: cr.need, have: cr.have });
     task.chargedCredits = cr.cost;
     task.chargedUserId = user.id;
@@ -1329,7 +1345,7 @@ async function startTask(task, user, { force = false } = {}) {
   return true;
 }
 
-function createTaskForFile(file, { operation = DEFAULT_OPERATION, userId, enhance = false, eraseRegion, eraseMode, modelVersion } = {}) {
+function createTaskForFile(file, { operation = DEFAULT_OPERATION, userId, enhance = false, eraseRegion, eraseMode, modelVersion, resolution = null } = {}) {
   const dur = file.durationVerified ? Number(file.durationSec) : NaN;
   const hasDuration = Number.isFinite(dur) && dur > 0.5 && dur < 6 * 3600;
   const mode = resolveEraseMode(eraseMode || OPERATIONS[operation]?.mode || 'Subtitle');
@@ -1348,6 +1364,7 @@ function createTaskForFile(file, { operation = DEFAULT_OPERATION, userId, enhanc
     fileSize: file.size,
     userId: userId || null,
     enhance: !!enhance,
+    resolution: resolution || null,
     operation,
     operationLabel: OPERATIONS[operation].label,
     mode,                                        // Subtitle | Text
@@ -1384,7 +1401,7 @@ function resultKey(file, task) {
   const regions = (task.eraseRatioLocation || []).map((r) =>
     ['top_left_x', 'top_left_y', 'bottom_right_x', 'bottom_right_y'].map((k) => r[k])).sort();
   return JSON.stringify([file.md5, task.userId, task.operation, task.mode,
-    task.modelVersion || null, regions, !!task.enhance]);
+    task.modelVersion || null, regions, !!task.enhance, task.resolution || null]);
 }
 
 function resultOfKey(key) {
@@ -1420,7 +1437,7 @@ function renewForReuse(file, task) {
 function appendFilesToBatch(batch, fileIds, durations = {}, overrides = {}) {
   const eff = applyErasePreset({ preset: overrides.erasePreset || batch.erasePreset,
     region: overrides.eraseRegion, mode: overrides.eraseMode, model: overrides.modelVersion });
-  const settings = { userId: batch.userId, operation: batch.operation, mode: eff.mode,
+  const settings = { userId: batch.userId, operation: batch.operation, mode: eff.mode, resolution: overrides.resolution || batch.resolution || null,
     modelVersion: eff.model || (eff.mode === 'Text' ? 'v5.6' : null),
     eraseRatioLocation: eff.region, enhance: overrides.enhance ?? batch.enhance };
   const added = [];
@@ -1437,7 +1454,7 @@ function appendFilesToBatch(batch, fileIds, durations = {}, overrides = {}) {
     if (hit) { renewForReuse(file, task); hit.rec.reused += 1; }
     if (!task) {
       task = createTaskForFile(file, { operation: batch.operation, userId: batch.userId, enhance: settings.enhance,
-        eraseRegion: eff.region, eraseMode: eff.mode, modelVersion: settings.modelVersion });
+        eraseRegion: eff.region, eraseMode: eff.mode, modelVersion: settings.modelVersion, resolution: settings.resolution });
       task.erasePreset = eff.preset;
     }
     const item = { fileId: fid, taskId: task.id, shared, reused: !!hit,
@@ -1449,7 +1466,7 @@ function appendFilesToBatch(batch, fileIds, durations = {}, overrides = {}) {
   return added;
 }
 
-function createBatch({ fileIds, operation = DEFAULT_OPERATION, durations = {}, userId, enhance = false, erasePreset = 'standard', eraseRegion, eraseMode, modelVersion } = {}) {
+function createBatch({ fileIds, operation = DEFAULT_OPERATION, durations = {}, userId, enhance = false, erasePreset = 'standard', eraseRegion, eraseMode, modelVersion, resolution = null } = {}) {
   db.batches ||= {};
   const batch = {
     id: id('batch'),
@@ -1457,11 +1474,12 @@ function createBatch({ fileIds, operation = DEFAULT_OPERATION, durations = {}, u
     operation,
     erasePreset: resolveErasePreset(erasePreset),
     enhance: !!enhance,
+    resolution: resolution || null,
     userId: userId || null,
     taskIds: [],
     items: [],
   };
-  appendFilesToBatch(batch, fileIds, durations, { erasePreset: batch.erasePreset, eraseRegion, eraseMode, modelVersion });
+  appendFilesToBatch(batch, fileIds, durations, { erasePreset: batch.erasePreset, eraseRegion, eraseMode, modelVersion, resolution });
   db.batches[batch.id] = batch;
   saveDb();
   const reusedN = batch.items.filter((i) => i.reused).length;
@@ -1584,6 +1602,8 @@ function serializeBatch(batch) {
       eraseMode: applyErasePreset({ preset: batch.erasePreset, region: batch.eraseRegion ?? undefined, mode: batch.eraseMode ?? undefined, model: batch.modelVersion ?? undefined }).mode,
       modelVersion: applyErasePreset({ preset: batch.erasePreset, region: batch.eraseRegion ?? undefined, mode: batch.eraseMode ?? undefined, model: batch.modelVersion ?? undefined }).model,
       enhance: !!batch.enhance,
+      operation: batch.operation,
+      resolution: batch.resolution || null,
       counts,
       progressPct,
       etaSeconds,
@@ -1906,6 +1926,9 @@ const ROUTES = {
     const body = await readJsonBody(req);
     const operation = body.operation || DEFAULT_OPERATION;
     if (!OPERATIONS[operation]) return sendError(res, 400, `未知的处理类型 ${operation}`, { allowed: Object.keys(OPERATIONS) });
+    if (operation === 'enhance' && body.resolution !== undefined && !ENHANCE_RESOLUTIONS.includes(String(body.resolution))) {
+      return sendError(res, 400, `未知的超清分辨率 ${body.resolution}`, { allowed: ENHANCE_RESOLUTIONS });
+    }
 
     // 计费只使用服务端核实的视频时长。
     await fileDuration(file);
@@ -1941,6 +1964,9 @@ const ROUTES = {
     }
     const operation = body.operation || DEFAULT_OPERATION;
     if (!OPERATIONS[operation]) return sendError(res, 400, `未知的处理类型 ${operation}`, { allowed: Object.keys(OPERATIONS) });
+    if (body.resolution != null && !ENHANCE_RESOLUTIONS.includes(String(body.resolution))) {
+      return sendError(res, 400, `未知的超清分辨率 ${body.resolution}`, { allowed: ENHANCE_RESOLUTIONS });
+    }
 
     const files = [];
     for (const fid of fileIds) {
@@ -1964,7 +1990,7 @@ const ROUTES = {
     }
 
     const batch = createBatch({
-    userId: currentUser(req)?.id || null, enhance: body.enhance === true, fileIds, operation, durations: body.durations || {}, erasePreset: body.erasePreset, eraseRegion: body.eraseRegion, eraseMode: body.eraseMode, modelVersion: body.modelVersion });
+    userId: currentUser(req)?.id || null, enhance: body.enhance === true, fileIds, operation, durations: body.durations || {}, erasePreset: body.erasePreset, eraseRegion: body.eraseRegion, eraseMode: body.eraseMode, modelVersion: body.modelVersion, resolution: body.resolution || null });
     sendJson(res, 202, { ...serializeBatch(batch), poll: `/api/batches/${batch.id}` });
   },
 
@@ -2102,6 +2128,50 @@ const ROUTES = {
    * 清理一个上传文件（用于"还没建批次就移除"的行）：
    * 只有没有任何批次行/任务引用它时才允许，免得删掉别人正在用的源文件。
    */
+  /**
+   * 链接去水印：粘贴公网视频直链 → 服务端探测时长 → 建任务（全屏文字模式）→ 立即开始
+   *   源文件不上传到本服务器；云端直接从该地址拉取
+   */
+  'POST /api/tasks/from-url': async (req, res) => {
+    if (!eraseApi.ready) {
+      return sendError(res, 503, '去字幕服务尚未就绪，请联系管理员开通后再试', { endpoint: eraseApi.endpoint, missing: eraseApi.missing });
+    }
+    const body = await readJsonBody(req);
+    const rawUrl = String(body.url || '').trim();
+    let parsed;
+    try { parsed = new URL(rawUrl); } catch { return sendError(res, 400, '链接格式不正确，请粘贴完整的 http/https 地址'); }
+    if (!/^https?:$/.test(parsed.protocol)) return sendError(res, 400, '只支持 http:// 或 https:// 的视频直链');
+    let base = 'video.mp4';
+    try { base = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() || 'video.mp4'); } catch { /* 保持默认 */ }
+    const name = sanitizeName(base) || 'video.mp4';
+    const ext = (path.extname(name) || '').toLowerCase();
+    if (!VIDEO_EXT.has(ext)) {
+      return sendError(res, 415, `链接文件类型 ${ext || '(无扩展名)'} 不受支持；请使用直链（.mp4/.mov/.mkv/.avi/.flv/.ts/.wmv）`, { allowed: [...VIDEO_EXT] });
+    }
+    const dg = diskGuard();
+    if (!dg.ok) return sendError(res, 507, diskLowMessage(dg.free), { freeBytes: dg.free, minFreeBytes: dg.minFree });
+    const me = currentUser(req);
+    if (!me) return sendError(res, 401, '请重新登录');
+    let duration;
+    try { duration = await probeVideoDuration(rawUrl); }
+    catch (err) { return sendError(res, err.status || 422, `无法读取该链接的视频信息：${err.message}`); }
+    // 去水印 = 全屏模式（Text + 全画面 + v5.6）
+    const eff = applyErasePreset({ preset: 'fullscreen' });
+    const task = createTaskForFile(
+      { id: null, name, size: 0, ext, durationSec: duration, durationVerified: true,
+        createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + UPLOAD_TTL_MS).toISOString() },
+      { operation: DEFAULT_OPERATION, userId: me.id, eraseRegion: eff.region, eraseMode: eff.mode, modelVersion: eff.model },
+    );
+    task.fileId = null;
+    task.sourceUrl = rawUrl;
+    task.erasePreset = eff.preset;
+    db.tasks[task.id] = task;
+    try { await startTask(task, me); }
+    catch (err) { refundTaskCredits(task, 'refund:failed'); delete db.tasks[task.id]; saveDb(); throw err; }
+    console.log(`[task] ${task.id} 链接去水印 <- ${rawUrl}（${duration.toFixed(1)}s）`);
+    sendJson(res, 202, { task: serializeTask(task), poll: `/api/tasks/${task.id}` });
+  },
+
   'DELETE /api/files/:id': async (req, res, { params }) => {
     const file = db.files[params.id];
     if (!file) return sendError(res, 404, '文件不存在');

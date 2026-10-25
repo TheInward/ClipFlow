@@ -8,7 +8,7 @@ export async function probeVideoDuration(filePath) {
   let stdout;
   try {
     ({ stdout } = await run(process.env.FFPROBE_PATH || 'ffprobe', [
-      '-v', 'error', '-protocol_whitelist', 'file,pipe',
+      '-v', 'error', '-protocol_whitelist', 'file,pipe,http,https,tcp,tls',
       '-show_entries', 'format=duration:stream=codec_type,duration',
       '-of', 'json', filePath,
     ], { timeout: 30000, maxBuffer: 1024 * 1024 }));

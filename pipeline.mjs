@@ -26,6 +26,22 @@ export const OPERATIONS = {
     mode: 'Subtitle', // 传给去字幕接口的 mode 参数
     outputExt: '.mp4',
   },
+  // 独立功能：语音转字幕（输出 SRT 文本，可选烧录成视频）
+  'asr-subtitles': {
+    id: 'asr-subtitles',
+    label: '语音转字幕',
+    desc: '识别音轨语音，生成带时间戳的字幕文本，可导出 SRT 或烧录成视频',
+    mode: 'Subtitle',
+    outputExt: '.srt',
+  },
+  // 独立功能：压缩 / 转码（平台规格适配）
+  'transcode': {
+    id: 'transcode',
+    label: '压缩转码',
+    desc: '转码压缩到指定分辨率/编码，适配平台上传规格',
+    mode: 'Subtitle',
+    outputExt: '.mp4',
+  },
   // 独立功能：只做画质增强/超分，不经过擦除
   'enhance': {
     id: 'enhance',
@@ -503,4 +519,108 @@ async function remoteSize(url) {
     const r = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(30000) });
     return Number(r.headers.get('content-length')) || 0;
   } catch { return 0; }
+}
+
+/* ------------------------------------------------------------ 语音转字幕
+ * 提交 /tools/asr-subtitles → 轮询 → 返回带时间戳的字幕数组
+ */
+export async function runAsr(videoUrl, { language = null, taskId = null, onSubmitted = () => {}, assertAlive = () => {}, pollMs = 3000, timeoutMs = 60 * 60 * 1000 } = {}) {
+  assertAlive();
+  if (!taskId) {
+    if (!process.env.AMK_API_KEY) throw new Error('未配置去字幕接口密钥（AMK_API_KEY）');
+    const submit = await fetchJson(`${apiBase()}/tools/asr-subtitles`, {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({ video_url: videoUrl, ...(language ? { language } : {}) }),
+    }, 30000);
+    if (!submit.res.ok) throw new Error(`提交字幕识别失败：HTTP ${submit.res.status}`);
+    const body = unwrap(submit.json);
+    if (body.root.success === false) throw new Error(`字幕识别被拒绝：${body.root.error?.code || 'UnknownError'}`);
+    taskId = body.field(['task_id', 'taskId', 'id']);
+    if (!taskId) throw new Error('字幕识别未返回 task_id');
+    onSubmitted(taskId);
+    console.log(`[asr] 已提交字幕识别 task_id=${taskId}`);
+  }
+  const started = Date.now();
+  for (;;) {
+    assertAlive();
+    if (Date.now() - started > timeoutMs) throw new Error('字幕识别超时');
+    await sleep(pollMs);
+    const r = await fetchJson(`${apiBase()}/tasks/${taskId}`, { headers: apiHeaders() }, 30000);
+    if (!r.res.ok) throw new Error(`查询字幕任务失败：HTTP ${r.res.status}`);
+    const d = unwrap(r.json);
+    const status = String(d.field(['status']) || '').toLowerCase();
+    if (['completed', 'succeeded', 'success'].includes(status)) {
+      const items = Array.isArray(d.root?.result?.subtitles) ? d.root.result.subtitles : [];
+      if (!items.length) throw new Error('没有识别出语音内容（视频可能没有人声）');
+      return { taskId, subtitles: items.map((s) => ({
+        start: Number(s.start_time ?? s.startTime ?? 0),
+        end: Number(s.end_time ?? s.endTime ?? 0),
+        text: String(s.subtitle_text ?? s.text ?? ''),
+        speaker: s.speaker ? String(s.speaker) : null,
+      })), elapsedSeconds: Math.round((Date.now() - started) / 1000) };
+    }
+    if (['failed', 'failure', 'error'].includes(status)) {
+      throw new Error(`字幕识别失败：${d.field(['error', 'message']) || status}`);
+    }
+  }
+}
+
+/** 生成 SRT 文本 */
+export function toSrt(subtitles) {
+  const t = (sec) => {
+    const s = Math.max(0, Number(sec) || 0);
+    const h = String(Math.floor(s / 3600)).padStart(2, '0');
+    const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+    const rest = (s % 60).toFixed(3).padStart(6, '0');
+    return `${h}:${m}:${rest.replace('.', ',')}`;
+  };
+  return subtitles.map((item, i) => `${i + 1}\n${t(item.start)} --> ${t(item.end)}\n${item.text}\n`).join('\n');
+}
+
+/* ------------------------------------------------------------ 压缩 / 转码
+ * 提交 /tools/transcode-video → 轮询 → 返回云端产物地址
+ */
+export async function runTranscode(videoUrl, { profile = '1080p', taskId = null, onSubmitted = () => {}, assertAlive = () => {}, pollMs = 4000, timeoutMs = 2 * 60 * 60 * 1000 } = {}) {
+  const PRESETS = {
+    '1080p': { video: { codec: 'h264', scale_type: 1, scale_long: 1920, bitrate_mode: 'crf', bitrate_crf: 23 } },
+    '720p': { video: { codec: 'h264', scale_type: 1, scale_long: 1280, bitrate_mode: 'crf', bitrate_crf: 26 } },
+    'hevc': { video: { codec: 'h265', scale_type: 1, scale_long: 1920, bitrate_mode: 'crf', bitrate_crf: 26 } },
+  };
+  const preset = PRESETS[profile] || PRESETS['1080p'];
+  assertAlive();
+  if (!taskId) {
+    if (!process.env.AMK_API_KEY) throw new Error('未配置去字幕接口密钥（AMK_API_KEY）');
+    const submit = await fetchJson(`${apiBase()}/tools/transcode-video`, {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({ video_url: videoUrl, video: preset.video, container_format: 'MP4' }),
+    }, 30000);
+    if (!submit.res.ok) throw new Error(`提交转码失败：HTTP ${submit.res.status}`);
+    const body = unwrap(submit.json);
+    if (body.root.success === false) throw new Error(`转码被拒绝：${body.root.error?.code || 'UnknownError'}`);
+    taskId = body.field(['task_id', 'taskId', 'id']);
+    if (!taskId) throw new Error('转码未返回 task_id');
+    onSubmitted(taskId);
+    console.log(`[transcode] 已提交转码（${profile}）task_id=${taskId}`);
+  }
+  const started = Date.now();
+  for (;;) {
+    assertAlive();
+    if (Date.now() - started > timeoutMs) throw new Error('转码超时');
+    await sleep(pollMs);
+    const r = await fetchJson(`${apiBase()}/tasks/${taskId}`, { headers: apiHeaders() }, 30000);
+    if (!r.res.ok) throw new Error(`查询转码任务失败：HTTP ${r.res.status}`);
+    const d = unwrap(r.json);
+    const status = String(d.field(['status']) || '').toLowerCase();
+    if (['completed', 'succeeded', 'success'].includes(status)) {
+      const url = d.field(['result', 'video_url']);
+      if (!url) throw new Error('转码完成但没有产物地址');
+      const size = await remoteSize(url);
+      return { url, size, duration: Number(d.field(['result', 'duration'])) || 0, resolution: d.field(['result', 'resolution']) || null, taskId, elapsedSeconds: Math.round((Date.now() - started) / 1000) };
+    }
+    if (['failed', 'failure', 'error'].includes(status)) {
+      throw new Error(`转码失败：${d.field(['error', 'message']) || status}`);
+    }
+  }
 }

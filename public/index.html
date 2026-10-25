@@ -62,6 +62,8 @@
       <nav class="tabbar" id="tabbar" role="tablist">
         <button class="tab is-active" type="button" data-tab="erase" role="tab">去字幕</button>
         <button class="tab" type="button" data-tab="enhance" role="tab">超清画质</button>
+        <button class="tab" type="button" data-tab="asr" role="tab">加字幕</button>
+        <button class="tab" type="button" data-tab="transcode" role="tab">压缩转码</button>
         <button class="tab" type="button" data-tab="link" role="tab">链接去水印</button>
       </nav>
       <div class="page-head">
@@ -92,6 +94,28 @@
             <option value="fullscreen">全屏模式（更彻底，耗时约 3 倍）</option>
           </select>
           <span class="hint-inline" id="eraseHint">标准模式：识别常规字幕（快）；全屏模式：擦画面任何位置的文字与文字水印，耗时明显更长</span>
+        </div>
+        <div class="region-row" id="asrRow" hidden>
+          <label for="asrLang">识别语种</label>
+          <select id="asrLang">
+            <option value="auto" selected>自动探测</option>
+            <option value="cmn-Hans-CN">简体中文</option>
+            <option value="eng-US">英语</option>
+          </select>
+          <label class="chk-inline" for="asrBurn">
+            <input id="asrBurn" type="checkbox" />
+            <span>烧录成视频</span>
+          </label>
+          <span class="hint-inline">默认导出带时间戳的 SRT 字幕文件；勾选「烧录成视频」会用服务器本地 ffmpeg 把字幕压进画面（较慢，建议 ≤3 分钟短片）</span>
+        </div>
+        <div class="region-row" id="tcRow" hidden>
+          <label for="tcProfile">压缩预设</label>
+          <select id="tcProfile">
+            <option value="1080p" selected>1080P 标准（H.264，推荐上传平台）</option>
+            <option value="720p">720P 更小体积（H.264）</option>
+            <option value="hevc">H.265 高压缩（体积最小）</option>
+          </select>
+          <span class="hint-inline">云端转码压缩，输出 MP4（最长 3 小时）；按原片秒数计费</span>
         </div>
         <div class="region-row" id="resRow" hidden>
           <label for="resSelect">目标分辨率</label>

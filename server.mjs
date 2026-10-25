@@ -19,7 +19,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
-import { enhanceVideo } from './pipeline.mjs';
+import { enhanceVideo, runAsr, toSrt, runTranscode } from './pipeline.mjs';
 import { ZipStream, streamRemote } from './zip.mjs';
 import { probeVideoDuration, probeAvailable } from './media.mjs';
 import { normalizePhone, findUserByPhone, createUser, checkPassword, publicUser, createUserSession, chargeSeconds, refundSeconds, createCodes, redeemCode, ensureAdmin, setPassword, touchSession } from './accounts.mjs';
@@ -267,6 +267,10 @@ const VIDEO_EXT = new Set(['.mp4', '.mov', '.mkv', '.avi', '.flv', '.ts', '.wmv'
 const ENHANCE_RESOLUTIONS = ['720p', '1080p', '2k', '4k'];
 // 超清版本：标准版（快）/ 专业版（更清晰、更慢、计费更高）
 const ENHANCE_VERSIONS = ['standard', 'professional'];
+// 语音转字幕：语种（空 = 自动探测）+ 是否烧录成视频
+const ASR_LANGUAGES = ['auto', 'cmn-Hans-CN', 'eng-US'];
+// 压缩转码预设
+const TRANSCODE_PROFILES = ['1080p', '720p', 'hevc'];
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -1069,6 +1073,74 @@ async function execute(task) {
     const srcPath = file ? path.join(DATA_DIR, file.storedPath) : null;
     const outDir = path.join(OUTPUT_DIR, task.id);
 
+    // ---- 语音转字幕 / 压缩转码（独立功能，同样直接用云端接口处理源文件） ----
+    if (task.operation === 'asr-subtitles' || task.operation === 'transcode') {
+      const assertAlive2 = () => { if (task.canceled) throw Object.assign(new Error('任务已取消'), { code: 'CANCELED' }); };
+      const opts = task.options || {};
+      const baseName2 = path.basename(file?.name || task.fileName, file?.ext || path.extname(task.fileName));
+      const srcUrl = publicFileUrl(file.id);
+      if (task.operation === 'asr-subtitles') {
+        task.stage = '正在识别语音';
+        task.stageKey = 'cloud';
+        task.progress = Math.max(Number(task.progress) || 0, 10);
+        saveDb();
+        console.log(`[asr] 任务 ${task.id} 开始识别（语种 ${opts.language || '自动'}，已扣 ${task.chargedCredits} 积分）`);
+        const asr = await runAsr(srcUrl, {
+          language: opts.language && opts.language !== 'auto' ? opts.language : null,
+          taskId: task.remoteTaskId, assertAlive: assertAlive2,
+          onSubmitted: (id) => { task.remoteTaskId = id; saveDb(); },
+        });
+        assertAlive2();
+        const srt = toSrt(asr.subtitles);
+        await fsp.mkdir(outDir, { recursive: true });
+        const srtPath = path.join(outDir, 'subtitle.srt');
+        await fsp.writeFile(srtPath, srt, 'utf8');
+        if (opts.burn) {
+          task.stage = '正在烧录字幕';
+          task.stageKey = 'fetch';
+          task.progress = Math.max(Number(task.progress) || 0, 70);
+          saveDb();
+          const burnPath = path.join(outDir, 'output.mp4');
+          await burnSubtitles(srcPath, srtPath, burnPath);
+          assertAlive2();
+          const st = await fsp.stat(burnPath);
+          finishTaskResult(task, { name: `${baseName2}-字幕.mp4`, size: st.size, hasVideo: true, remote: false });
+          console.log(`[asr] 任务 ${task.id} 字幕烧录完成（${asr.subtitles.length} 条），产物 ${formatBytes(st.size)}`);
+        } else {
+          finishTaskResult(task, { name: `${baseName2}-字幕.srt`, size: Buffer.byteLength(srt), hasVideo: false, remote: false, srt: true });
+          console.log(`[asr] 任务 ${task.id} 生成 SRT（${asr.subtitles.length} 条）`);
+        }
+        return;
+      }
+      // 压缩 / 转码
+      task.stage = '正在压缩转码';
+      task.stageKey = 'cloud';
+      task.progress = Math.max(Number(task.progress) || 0, 10);
+      saveDb();
+      console.log(`[transcode] 任务 ${task.id} 开始转码（${opts.profile || '1080p'}，已扣 ${task.chargedCredits} 积分）`);
+      const tr = await runTranscode(srcUrl, {
+        profile: opts.profile || '1080p', taskId: task.remoteTaskId, assertAlive: assertAlive2,
+        onSubmitted: (id) => { task.remoteTaskId = id; saveDb(); },
+      });
+      assertAlive2();
+      const keptTr = KEEP_ARTIFACT;
+      let sizeTr = tr.size || 0;
+      if (keptTr) {
+        await fetchPool.run(async () => {
+          assertAlive2();
+          const response = await fetch(tr.url, { signal: AbortSignal.timeout(900000) });
+          if (!response.ok) throw new Error(`下载转码结果失败：HTTP ${response.status}`);
+          const dest = path.join(outDir, 'output.mp4');
+          await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(dest));
+          assertAlive2();
+          sizeTr = (await fsp.stat(dest)).size;
+        });
+      }
+      finishTaskResult(task, { name: `${baseName2}-${opts.profile || '1080p'}.mp4`, size: sizeTr, hasVideo: true, remote: !keptTr, remoteUrl: tr.url });
+      console.log(`[transcode] 任务 ${task.id} 转码完成（${tr.resolution || opts.profile}），用时 ${tr.elapsedSeconds}s，产物 ${formatBytes(sizeTr)}`);
+      return;
+    }
+
     // ---- 超清画质（独立功能）：直接把源文件交给云端画质增强接口，不经过擦除 ----
     if (task.operation === 'enhance') {
       task.stage = '正在增强画质';
@@ -1310,6 +1382,37 @@ function assertTaskOwner(task, user) {
   if (user.role !== 'admin' && task.userId !== user.id) throw Object.assign(new Error('任务不存在'), { status: 404 });
 }
 
+/** 统一的成功收尾：写结果、算耗时、登记复用索引 */
+function finishTaskResult(task, { name, size, hasVideo, remote, remoteUrl = null, srt = false }) {
+  task.result = { name, size, hasVideo, poster: hasVideo && !srt, remote, ...(srt ? { srt: true } : {}) };
+  if (remote && remoteUrl) {
+    task.remoteResultUrl = remoteUrl;
+    task.remoteExpiresAt = urlExpiry(remoteUrl);
+  }
+  task.status = 'succeeded';
+  task.progress = 100;
+  task.stage = '处理完成';
+  task.stageKey = 'done';
+  task.finishedAt = new Date().toISOString();
+  task.elapsedSeconds = Math.round((Date.parse(task.finishedAt) - Date.parse(task.startedAt)) / 1000);
+  task.etaSeconds = 0;
+  saveDb();
+  rememberResult(task);
+}
+
+/** 用本地 ffmpeg 把 SRT 烧进视频（2 核机器较慢，仅建议短片） */
+async function burnSubtitles(srcPath, srtPath, destPath) {
+  const { execFile } = await import('node:child_process');
+  const ffmpeg = process.env.FFMPEG_PATH
+    || (process.env.FFPROBE_PATH ? path.join(path.dirname(process.env.FFPROBE_PATH), 'ffmpeg') : 'ffmpeg');
+  const escaped = srtPath.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
+  await new Promise((resolve, reject) => {
+    execFile(ffmpeg, ['-y', '-i', srcPath, '-vf', `subtitles=${escaped}`, '-c:v', 'libx264', '-preset', 'veryfast',
+      '-crf', '23', '-c:a', 'copy', destPath], { timeout: 2 * 60 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 },
+    (err, _so, se) => (err ? reject(new Error(`烧录字幕失败：${String(se || err.message).slice(-300)}`)) : resolve()));
+  });
+}
+
 /** 源文件的直接操作（删除/处理）只允许上传者本人；无主的历史文件放行 */
 function assertFileAccess(file, user) {
   if (!user) throw Object.assign(new Error('请重新登录'), { status: 401 });
@@ -1348,7 +1451,7 @@ async function startTask(task, user, { force = false } = {}) {
   return true;
 }
 
-function createTaskForFile(file, { operation = DEFAULT_OPERATION, userId, enhance = false, eraseRegion, eraseMode, modelVersion, resolution = null, toolVersion = null } = {}) {
+function createTaskForFile(file, { operation = DEFAULT_OPERATION, userId, enhance = false, eraseRegion, eraseMode, modelVersion, resolution = null, toolVersion = null, options = null } = {}) {
   const dur = file.durationVerified ? Number(file.durationSec) : NaN;
   const hasDuration = Number.isFinite(dur) && dur > 0.5 && dur < 6 * 3600;
   const mode = resolveEraseMode(eraseMode || OPERATIONS[operation]?.mode || 'Subtitle');
@@ -1369,6 +1472,8 @@ function createTaskForFile(file, { operation = DEFAULT_OPERATION, userId, enhanc
     enhance: !!enhance,
     resolution: resolution || null,
     toolVersion: toolVersion || null,
+    options: options || null,
+    options: options || null,
     toolVersion: toolVersion || null,
     operation,
     operationLabel: OPERATIONS[operation].label,
@@ -1406,7 +1511,8 @@ function resultKey(file, task) {
   const regions = (task.eraseRatioLocation || []).map((r) =>
     ['top_left_x', 'top_left_y', 'bottom_right_x', 'bottom_right_y'].map((k) => r[k])).sort();
   return JSON.stringify([file.md5, task.userId, task.operation, task.mode,
-    task.modelVersion || null, regions, !!task.enhance, task.resolution || null, task.toolVersion || null]);
+    task.modelVersion || null, regions, !!task.enhance, task.resolution || null, task.toolVersion || null,
+    task.options ? JSON.stringify(task.options) : null]);
 }
 
 function resultOfKey(key) {
@@ -1442,7 +1548,7 @@ function renewForReuse(file, task) {
 function appendFilesToBatch(batch, fileIds, durations = {}, overrides = {}) {
   const eff = applyErasePreset({ preset: overrides.erasePreset || batch.erasePreset,
     region: overrides.eraseRegion, mode: overrides.eraseMode, model: overrides.modelVersion });
-  const settings = { userId: batch.userId, operation: batch.operation, mode: eff.mode, resolution: overrides.resolution || batch.resolution || null, toolVersion: overrides.toolVersion || batch.toolVersion || null,
+  const settings = { userId: batch.userId, operation: batch.operation, mode: eff.mode, resolution: overrides.resolution || batch.resolution || null, toolVersion: overrides.toolVersion || batch.toolVersion || null, options: overrides.options || batch.options || null,
     modelVersion: eff.model || (eff.mode === 'Text' ? 'v5.6' : null),
     eraseRatioLocation: eff.region, enhance: overrides.enhance ?? batch.enhance };
   const added = [];
@@ -1459,7 +1565,7 @@ function appendFilesToBatch(batch, fileIds, durations = {}, overrides = {}) {
     if (hit) { renewForReuse(file, task); hit.rec.reused += 1; }
     if (!task) {
       task = createTaskForFile(file, { operation: batch.operation, userId: batch.userId, enhance: settings.enhance,
-        eraseRegion: eff.region, eraseMode: eff.mode, modelVersion: settings.modelVersion, resolution: settings.resolution, toolVersion: settings.toolVersion });
+        eraseRegion: eff.region, eraseMode: eff.mode, modelVersion: settings.modelVersion, resolution: settings.resolution, toolVersion: settings.toolVersion, options: settings.options });
       task.erasePreset = eff.preset;
     }
     const item = { fileId: fid, taskId: task.id, shared, reused: !!hit,
@@ -1471,7 +1577,7 @@ function appendFilesToBatch(batch, fileIds, durations = {}, overrides = {}) {
   return added;
 }
 
-function createBatch({ fileIds, operation = DEFAULT_OPERATION, durations = {}, userId, enhance = false, erasePreset = 'standard', eraseRegion, eraseMode, modelVersion, resolution = null, toolVersion = null } = {}) {
+function createBatch({ fileIds, operation = DEFAULT_OPERATION, durations = {}, userId, enhance = false, erasePreset = 'standard', eraseRegion, eraseMode, modelVersion, resolution = null, toolVersion = null, options = null } = {}) {
   db.batches ||= {};
   const batch = {
     id: id('batch'),
@@ -1484,7 +1590,7 @@ function createBatch({ fileIds, operation = DEFAULT_OPERATION, durations = {}, u
     taskIds: [],
     items: [],
   };
-  appendFilesToBatch(batch, fileIds, durations, { erasePreset: batch.erasePreset, eraseRegion, eraseMode, modelVersion, resolution, toolVersion: batch.toolVersion });
+  appendFilesToBatch(batch, fileIds, durations, { erasePreset: batch.erasePreset, eraseRegion, eraseMode, modelVersion, resolution, toolVersion: batch.toolVersion, options: batch.options });
   db.batches[batch.id] = batch;
   saveDb();
   const reusedN = batch.items.filter((i) => i.reused).length;
@@ -1610,6 +1716,7 @@ function serializeBatch(batch) {
       operation: batch.operation,
       resolution: batch.resolution || null,
       toolVersion: batch.toolVersion || null,
+      options: batch.options || null,
       counts,
       progressPct,
       etaSeconds,
@@ -2010,6 +2117,17 @@ const ROUTES = {
     if (body.toolVersion != null && !ENHANCE_VERSIONS.includes(String(body.toolVersion))) {
       return sendError(res, 400, `未知的超清版本 ${body.toolVersion}`, { allowed: ENHANCE_VERSIONS });
     }
+    // 各功能的选项（语音转字幕：语种/是否烧录；压缩转码：预设）
+    let options = body.options && typeof body.options === 'object' ? body.options : null;
+    if (operation === 'asr-subtitles') {
+      options = { language: String(options?.language || 'auto'), burn: options?.burn === true };
+      if (!ASR_LANGUAGES.includes(options.language)) return sendError(res, 400, `未知的识别语种 ${options.language}`, { allowed: ASR_LANGUAGES });
+    } else if (operation === 'transcode') {
+      options = { profile: String(options?.profile || '1080p') };
+      if (!TRANSCODE_PROFILES.includes(options.profile)) return sendError(res, 400, `未知的压缩预设 ${options.profile}`, { allowed: TRANSCODE_PROFILES });
+    } else {
+      options = null;
+    }
 
     const files = [];
     for (const fid of fileIds) {
@@ -2033,7 +2151,7 @@ const ROUTES = {
     }
 
     const batch = createBatch({
-    userId: currentUser(req)?.id || null, enhance: body.enhance === true, fileIds, operation, durations: body.durations || {}, erasePreset: body.erasePreset, eraseRegion: body.eraseRegion, eraseMode: body.eraseMode, modelVersion: body.modelVersion, resolution: body.resolution || null, toolVersion: body.toolVersion || null });
+    userId: currentUser(req)?.id || null, enhance: body.enhance === true, fileIds, operation, durations: body.durations || {}, erasePreset: body.erasePreset, eraseRegion: body.eraseRegion, eraseMode: body.eraseMode, modelVersion: body.modelVersion, resolution: body.resolution || null, toolVersion: body.toolVersion || null, options });
     sendJson(res, 202, { ...serializeBatch(batch), poll: `/api/batches/${batch.id}` });
   },
 
@@ -2468,6 +2586,12 @@ batch.items.splice(idx, 1);
     if (task.result.hasVideo && task.result.remote && remoteAlive(task)) {
       res.writeHead(302, { Location: task.remoteResultUrl, 'Cache-Control': 'no-store' });
       return res.end();
+    }
+    if (task.result.srt) {
+      return serveFile(req, res, path.join(OUTPUT_DIR, task.id, 'subtitle.srt'), {
+        downloadName: task.result.name,
+        mime: 'application/x-subrip; charset=utf-8',
+      });
     }
     const target = task.result.hasVideo
       ? path.join(OUTPUT_DIR, task.id, `output${outExt}`)

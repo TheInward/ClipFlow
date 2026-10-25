@@ -19,6 +19,7 @@ const el = {
   uploadCard: $('#uploadCard'), dropzone: $('#dropzone'), fileInput: $('#fileInput'),
   dropHint: $('#dropHint'), quota: $('#quota'),
   erasePreset: $('#erasePreset'), eraseHint: $('#eraseHint'), modeRow: $('#modeRow'), resRow: $('#resRow'), resSelect: $('#resSelect'), verSelect: $('#verSelect'), batchZip: $('#batchZip'),
+  asrRow: $('#asrRow'), asrLang: $('#asrLang'), asrBurn: $('#asrBurn'), tcRow: $('#tcRow'), tcProfile: $('#tcProfile'),
   tabbar: $('#tabbar'), uploadCard: $('#uploadCard'), linkCard: $('#linkCard'), linkInputs: $('#linkInputs'), linkAdd: $('#linkAdd'),
   linkNotice: $('#linkNotice'), pageTitle: $('#pageTitle'), pageDesc: $('#pageDesc'),
   batchCard: $('#batchCard'), batchSub: $('#batchSub'), batchPill: $('#batchPill'), notice: $('#notice'),
@@ -44,7 +45,7 @@ const state = {
   pollTimer: null,
   tickTimer: null,
   tab: 'erase',                       // erase | enhance | link
-  tabBatch: { erase: null, enhance: null, link: null },
+  tabBatch: { erase: null, enhance: null, asr: null, transcode: null, link: null },
   linkTasks: [],                      // 链接去水印创建的任务
 };
 
@@ -1536,11 +1537,15 @@ el.dropzone.addEventListener('keydown', (e) => {
  * ========================================================================== */
 function tabPayload() {
   if (state.tab === 'enhance') return { operation: 'enhance', resolution: el.resSelect?.value || '1080p', toolVersion: el.verSelect?.value || 'standard' };
+  if (state.tab === 'asr') return { operation: 'asr-subtitles', options: { language: el.asrLang?.value || 'auto', burn: el.asrBurn?.checked === true } };
+  if (state.tab === 'transcode') return { operation: 'transcode', options: { profile: el.tcProfile?.value || '1080p' } };
   return { operation: 'erase-subtitle', erasePreset: el.erasePreset?.value || 'standard' };
 }
 
 const TAB_META = {
   erase: { title: '批量去字幕', desc: '一次最多 30 个视频（单个不超过 100 MB）。勾选任务后用「批量开始 / 批量取消」，也可以单独控制每一条；点「预览」对比源视频与结果。' },
+  asr: { title: '语音转字幕', desc: '识别视频里的语音，生成带时间戳的 SRT 字幕；可勾选「烧录成视频」直接得到带字幕的成片。按原片秒数计费。' },
+  transcode: { title: '压缩转码', desc: '把视频转码压缩到平台适合的分辨率/编码（1080P / 720P / H.265），输出 MP4，便于上传与分发。按原片秒数计费。' },
   enhance: { title: '超清画质', desc: '把视频增强 / 超分到更清晰的画质（去噪、色彩、清晰度、超分）。按原片秒数计费，与分辨率档位无关。' },
   link: { title: '链接去水印', desc: '粘贴公网视频直链，直接调用云端处理，视频无需上传到本服务器；处理方式为全屏模式擦除文字与文字水印。' },
 };
@@ -1556,8 +1561,10 @@ async function setTab(tab) {
   const isLink = tab === 'link';
   if (el.uploadCard) el.uploadCard.hidden = isLink;
   if (el.linkCard) el.linkCard.hidden = !isLink;
-  if (el.modeRow) el.modeRow.hidden = tab === 'enhance';
+  if (el.modeRow) el.modeRow.hidden = tab !== 'erase';
   if (el.resRow) el.resRow.hidden = tab !== 'enhance';
+  if (el.asrRow) el.asrRow.hidden = tab !== 'asr';
+  if (el.tcRow) el.tcRow.hidden = tab !== 'transcode';
   stopPolling();
   state.items = [];
   state.selected.clear();

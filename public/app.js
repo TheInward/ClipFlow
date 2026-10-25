@@ -260,6 +260,7 @@ async function init() {
   }
   startTicker();
   render();
+  switchPage('home');
   await restore();
 }
 
@@ -1729,7 +1730,7 @@ setInterval(refreshHeader, 10000);
 /* ============================================================================
  * 顶层页面：工具 / 创作 / 资产 / 积分
  * ========================================================================== */
-const PAGE_IDS = { tools: 'pageTools', studio: 'pageStudio', assets: 'pageAssets', plans: 'pagePlans' };
+const PAGE_IDS = { home: 'pageHome', tools: 'pageTools', studio: 'pageStudio', assets: 'pageAssets', plans: 'pagePlans' };
 let currentPage = 'tools';
 let assetKind = 'all';
 let assetList = [];
@@ -1745,6 +1746,7 @@ function switchPage(page) {
     b.classList.toggle('is-active', b.dataset.page === page);
   });
   if (page === 'assets') loadAssets();
+  if (page === 'home') { loadAssets().then(renderHome).catch(() => renderHome()); }
   if (page === 'studio' && el.studioNotice) {
     // 生成服务未接入时给出明确提示（不阻塞其它功能）
     el.studioNotice.hidden = false;
@@ -1829,3 +1831,49 @@ if (el.studioSend) {
 if (el.plansRedeem) {
   el.plansRedeem.addEventListener('click', () => redeemPrompt());
 }
+
+/* ============================================================================
+ * 首页（工作台）：指令栏 + Bento 工具矩阵 + 最近资产
+ * ========================================================================== */
+function renderHome(){
+  const box = document.getElementById('homeAssets');
+  if (!box) return;
+  box.innerHTML = '';
+  const list = (assetList || []).slice(0, 4);
+  if (!list.length) {
+    box.innerHTML = '<div class="notice">还没有资产：先去「工具」上传并处理一个视频。</div>';
+    return;
+  }
+  const ICON = { video: '▶', text: 'T', audio: '♫', image: '▣' };
+  for (const a of list) {
+    const card = document.createElement('div');
+    card.className = 'asset';
+    card.innerHTML = `
+      <div class="a-thumb">${ICON[a.kind] || '▶'}<span class="a-badge">${a.source === 'upload' ? '上传' : '处理'}</span></div>
+      <div class="a-name" title="${escapeHtml(a.name || '')}">${escapeHtml(a.name || '')}</div>
+      <div class="a-meta">${a.kind === 'text' ? '字幕/文稿' : (a.remote ? '云端保存' : '本地保存')}${a.sizeText ? ' · ' + a.sizeText : ''}</div>
+      <div class="a-date">${a.createdAt ? new Date(a.createdAt).toLocaleString('zh-CN', { hour12: false }) : ''}</div>
+      <div class="a-acts"><button type="button" class="home-open">去处理</button></div>`;
+    card.querySelector('.home-open').addEventListener('click', () => goTool('erase'));
+    box.appendChild(card);
+  }
+}
+
+/** 切到工具页并激活对应工具标签 */
+function goTool(tab){
+  switchPage('tools');
+  const btn = document.querySelector(`#tabbar .tab[data-tab="${tab}"]`);
+  if (btn) btn.click();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('[data-tool-tab]');
+  if (t) { goTool(t.dataset.toolTab); return; }
+  const p = e.target.closest('[data-page-go]');
+  if (p) { switchPage(p.dataset.pageGo); }
+});
+const homeGo = document.getElementById('homeCmdGo');
+if (homeGo) homeGo.addEventListener('click', () => goTool('erase'));
+const homeCmd = document.getElementById('homeCmd');
+if (homeCmd) homeCmd.addEventListener('keydown', (e) => { if (e.key === 'Enter') goTool('erase'); });

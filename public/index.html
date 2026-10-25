@@ -60,12 +60,72 @@
 
     <main class="container">
       <nav class="nav-main" id="navMain">
-        <button class="nav-pill is-active" type="button" data-page="tools">工具</button>
+        <button class="nav-pill is-active" type="button" data-page="home">首页</button>
+        <button class="nav-pill" type="button" data-page="tools">工具</button>
         <button class="nav-pill" type="button" data-page="studio">创作</button>
         <button class="nav-pill" type="button" data-page="assets">资产</button>
         <button class="nav-pill" type="button" data-page="plans">积分</button>
       </nav>
-      <div id="pageTools">
+      <!-- ===================== 首页 ===================== -->
+      <section id="pageHome">
+        <div class="hero2">
+          <p class="eyebrow">AI VIDEO ENGINE</p>
+          <h1>把视频交给 <span class="ul">AI 引擎</span><br/>一句话完成全部后期</h1>
+          <p class="hero-lead">去字幕、擦除、翻译配音、超清修复、提取文案 —— 上传即处理，无需安装任何软件。</p>
+          <div class="composer hero-composer">
+            <div class="cap-in">
+              <span class="spark">✦</span>
+              <input id="homeCmd" placeholder="描述你想怎么处理这个视频…" />
+              <button class="btn btn-primary" type="button" id="homeCmdGo">开始处理</button>
+            </div>
+          </div>
+          <div class="sugg">
+            <button type="button" data-tool-tab="erase">去掉字幕和台标</button>
+            <button type="button" data-tool-tab="more">擦掉画面里的杂物</button>
+            <button type="button" data-tool-tab="asr">提取文案</button>
+            <button type="button" data-tool-tab="enhance">超分到 4K</button>
+            <button type="button" data-tool-tab="transcode">压缩上传规格</button>
+          </div>
+          <div class="stats2">
+            <div><b>6</b><span>在线工具</span></div>
+            <div><b>30</b><span>单批文件</span></div>
+            <div><b>1</b><span>积分 / 秒</span></div>
+            <div><b>0</b><span>安装成本</span></div>
+          </div>
+        </div>
+
+        <div class="sec-head2"><div><p class="eyebrow">CAPABILITIES</p><h2>一个引擎，覆盖全流程</h2></div></div>
+        <div class="bento2">
+          <button class="tile2 big" type="button" data-tool-tab="erase">
+            <span class="badge2">核心</span>
+            <h3>视频去文字</h3><p>逐帧擦除硬字幕、水印文字，保留画面细节</p>
+          </button>
+          <button class="tile2" type="button" data-tool-tab="enhance">
+            <div class="g2">超</div><h3>超清画质</h3><p>去噪 / 锐化 / 超分</p>
+          </button>
+          <button class="tile2" type="button" data-tool-tab="asr">
+            <div class="g2">字</div><h3>语音转字幕</h3><p>生成 SRT 或烧录成片</p>
+          </button>
+          <button class="tile2" type="button" data-tool-tab="transcode">
+            <div class="g2">压</div><h3>压缩转码</h3><p>1080P / H.265 适配平台</p>
+          </button>
+          <button class="tile2" type="button" data-tool-tab="more">
+            <div class="g2">除</div><h3>更多工具</h3><p>文稿 / 打码 / 抠图 / 区域遮挡</p>
+          </button>
+          <button class="tile2" type="button" data-tool-tab="link">
+            <div class="g2">链</div><h3>链接去水印</h3><p>粘贴直链直接处理</p>
+          </button>
+          <button class="tile2 offline" type="button" data-page-go="studio">
+            <div class="g2">生</div><h3>图片 / 视频生成</h3><p>接入模型后开放</p>
+          </button>
+        </div>
+
+        <div class="sec-head2" style="margin-top:44px"><div><p class="eyebrow">RECENT</p><h2>最近资产</h2></div>
+          <button class="btn btn-text" type="button" data-page-go="assets">更多资产 ›</button></div>
+        <div class="asset-grid" id="homeAssets"></div>
+      </section>
+
+      <div id="pageTools" hidden>
       <nav class="tabbar" id="tabbar" role="tablist">
         <button class="tab is-active" type="button" data-tab="erase" role="tab">去字幕</button>
         <button class="tab" type="button" data-tab="enhance" role="tab">超清画质</button>

@@ -856,3 +856,41 @@ body{background:var(--canvas)}
 .tile2.offline{opacity:.6}
 .tile2.offline .tag-off{position:absolute;right:12px;top:12px;font:600 9px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);border:1px solid var(--line);border-radius:5px;padding:3px 6px}
 @media (max-width:980px){ .bento2{grid-template-columns:repeat(2,1fr)} .tile2.big{grid-column:span 2;grid-row:auto;min-height:170px} .stats2{grid-template-columns:repeat(2,1fr)} }
+
+/* ---------- 工具工作台（两列：上传/参数 | 批次列表） ---------- */
+.ws2{display:grid;grid-template-columns:minmax(0,404px) minmax(0,1fr);gap:16px;align-items:start}
+.ws2.single{grid-template-columns:minmax(0,1fr)}
+.ws2 > #uploadCard{position:sticky;top:82px}
+.ws2 > #batchCard{min-width:0}
+#uploadCard{border-radius:22px;padding:20px}
+#uploadCard .card-head h2{font-size:15px}
+#uploadCard .card-head p{font-size:12.5px;color:var(--ink-3)}
+.dropzone{border:1.5px dashed #d8d8dd;background:#fafafb;border-radius:16px;padding:34px 18px;transition:.18s}
+.dropzone:hover{border-color:#b9b9c0;background:#f5f5f7}
+.dropzone .up-icon{width:46px;height:46px;border-radius:14px;background:#111;color:#fff;display:grid;place-items:center;
+  margin:0 auto 12px;font-size:18px;box-shadow:0 12px 26px -14px rgba(10,10,12,.7)}
+.dropzone strong{font-size:14px}
+.dropzone .hint{font-size:11.5px;color:var(--ink-3);margin-top:6px}
+
+/* 参数行 → 卡片内紧凑行 */
+#uploadCard .region-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px;padding:11px 12px;
+  background:#fafafb;border:1px solid var(--line);border-radius:12px;font-size:12.5px}
+#uploadCard .region-row label{font-weight:600;color:var(--ink);min-width:auto;font-size:12.5px}
+#uploadCard .region-row select{height:30px;border-radius:8px;border:1px solid var(--line);background:#fff;font-size:12.5px;padding:0 8px;font-family:inherit}
+#uploadCard .hint-inline{flex-basis:100%;font-size:11px;color:var(--ink-3);line-height:1.5}
+#uploadCard .chk-inline{gap:6px;font-size:12.5px}
+
+/* 批次卡 */
+#batchCard{border-radius:22px;padding:18px 20px}
+#batchCard .card-head{margin-bottom:14px}
+#batchCard .card-head h2{font-size:15px}
+.summary{background:#fafafb;border:1px solid var(--line);border-radius:14px;padding:12px 14px}
+.summary-top{gap:10px}
+.summary .big{font-size:14px;font-weight:650}
+.chip-count{font-size:11.5px;border-radius:999px;padding:2px 8px;background:#fff;border:1px solid var(--line)}
+.list-head{align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--line-2);margin-bottom:0}
+.list-head .right{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
+.list-head .right .btn{height:32px;padding:0 12px;font-size:12.5px;border-radius:9px}
+#list .row{border-top:1px solid var(--line-2)}
+#list .row:hover{background:#fafafb}
+@media (max-width:1100px){ .ws2{grid-template-columns:minmax(0,1fr)} .ws2 > #uploadCard{position:static} }

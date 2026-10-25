@@ -1575,6 +1575,8 @@ async function setTab(tab) {
   const isLink = tab === 'link';
   if (el.uploadCard) el.uploadCard.hidden = isLink;
   if (el.linkCard) el.linkCard.hidden = !isLink;
+  const wsWrap = document.getElementById('wsWrap');
+  if (wsWrap) wsWrap.classList.toggle('single', tab === 'link');
   if (el.modeRow) el.modeRow.hidden = tab !== 'erase';
   if (el.resRow) el.resRow.hidden = tab !== 'enhance';
   if (el.asrRow) el.asrRow.hidden = tab !== 'asr';

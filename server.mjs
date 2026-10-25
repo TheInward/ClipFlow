@@ -21,7 +21,7 @@ import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { enhanceVideo, runAsr, toSrt, runTranscode, runOcr, runToolVideo } from './pipeline.mjs';
 import { ZipStream, streamRemote } from './zip.mjs';
-import { probeVideoDuration, probeAvailable } from './media.mjs';
+import { probeVideoDuration, probeAvailable, probeVideoSize } from './media.mjs';
 import { normalizePhone, findUserByPhone, createUser, checkPassword, publicUser, createUserSession, chargeSeconds, refundSeconds, createCodes, redeemCode, ensureAdmin, setPassword, touchSession } from './accounts.mjs';
 import { take as takeToken, stats as rateStats } from './ratelimit.mjs';
 import { fileURLToPath } from 'node:url';
@@ -276,6 +276,8 @@ const OCR_MODES = ['Subtitle', 'Detailed'];
 const FACE_MASK_MODES = ['mosaic', 'blur'];
 const FACE_STRENGTHS = ['low', 'medium', 'high'];
 const MATTE_BACKGROUNDS = ['green', 'black', 'white'];
+// 区域遮挡/消物：固定区域的三种处理方式
+const REGION_MODES = ['delogo', 'box', 'blur'];
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -1078,6 +1080,40 @@ async function execute(task) {
     const srcPath = file ? path.join(DATA_DIR, file.storedPath) : null;
     const outDir = path.join(OUTPUT_DIR, task.id);
 
+    // ---- 区域遮挡 / 消物（本地 ffmpeg，不依赖云端接口） ----
+    if (task.operation === 'region-blur') {
+      const optsR = task.options || {};
+      const baseNameR = path.basename(file?.name || task.fileName, file?.ext || path.extname(task.fileName));
+      task.stage = '正在读取分辨率';
+      task.stageKey = 'fetch';
+      task.progress = Math.max(Number(task.progress) || 0, 10);
+      saveDb();
+      const size = await probeVideoSize(srcPath);
+      const px = (v, total) => Math.max(2, Math.min(total - 2, Math.round((Number(v) / 100) * total)));
+      const x = px(optsR.x, size.width);
+      const y = px(optsR.y, size.height);
+      const w = Math.max(2, Math.min(size.width - x, Math.round((Number(optsR.w) / 100) * size.width)));
+      const h = Math.max(2, Math.min(size.height - y, Math.round((Number(optsR.h) / 100) * size.height)));
+      const filter = optsR.mode === 'box'
+        ? `drawbox=x=${x}:y=${y}:w=${w}:h=${h}:color=black@1:t=fill`
+        : optsR.mode === 'blur'
+          ? `split[a][b];[b]crop=${w}:${h}:${x}:${y},boxblur=25:2[c];[a][c]overlay=${x}:${y}`
+          : `delogo=x=${x}:y=${y}:w=${w}:h=${h}`;
+      task.stage = '正在处理画面区域';
+      task.progress = Math.max(Number(task.progress) || 0, 30);
+      saveDb();
+      console.log(`[region] 任务 ${task.id} ${optsR.mode || 'delogo'} 区域 ${x},${y} ${w}x${h}（${size.width}x${size.height}）`);
+      await runFfmpegFilter(srcPath, path.join(outDir, 'output.mp4'), filter, (pct) => {
+        if (task.canceled) return;
+        task.progress = Math.max(Number(task.progress) || 0, 30 + Math.round(pct * 0.6));
+        saveDb();
+      }, () => { if (task.canceled) throw Object.assign(new Error('任务已取消'), { code: 'CANCELED' }); });
+      const statR = await fsp.stat(path.join(outDir, 'output.mp4'));
+      finishTaskResult(task, { name: `${baseNameR}-区域处理.mp4`, size: statR.size, hasVideo: true, remote: false });
+      console.log(`[region] 任务 ${task.id} 完成，产物 ${formatBytes(statR.size)}`);
+      return;
+    }
+
     // ---- 更多工具：字幕文稿 / 人脸打码 / 人像抠图 ----
     if (task.operation === 'ocr-extract' || task.operation === 'face-blur' || task.operation === 'portrait-matte') {
       const assertAlive3 = () => { if (task.canceled) throw Object.assign(new Error('任务已取消'), { code: 'CANCELED' }); };
@@ -1465,6 +1501,24 @@ async function burnSubtitles(srcPath, srtPath, destPath) {
     execFile(ffmpeg, ['-y', '-i', srcPath, '-vf', `subtitles=${escaped}`, '-c:v', 'libx264', '-preset', 'veryfast',
       '-crf', '23', '-c:a', 'copy', destPath], { timeout: 2 * 60 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 },
     (err, _so, se) => (err ? reject(new Error(`烧录字幕失败：${String(se || err.message).slice(-300)}`)) : resolve()));
+  });
+}
+
+/** 本地 ffmpeg 按滤镜处理视频（带进度回调，可取消） */
+async function runFfmpegFilter(srcPath, destPath, filter, onProgress = () => {}, assertAlive = () => {}) {
+  const { execFile } = await import('node:child_process');
+  const ffmpeg = process.env.FFMPEG_PATH
+    || (process.env.FFPROBE_PATH ? path.join(path.dirname(process.env.FFPROBE_PATH), 'ffmpeg') : 'ffmpeg');
+  await new Promise((resolve, reject) => {
+    const child = execFile(ffmpeg, ['-y', '-i', srcPath, '-vf', filter, '-c:v', 'libx264', '-preset', 'veryfast',
+      '-crf', '23', '-c:a', 'copy', '-progress', 'pipe:1', '-nostats', destPath],
+    { timeout: 2 * 60 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err, _so, se) => {
+      if (err) reject(new Error(`本地处理失败：${String(se || err.message).slice(-300)}`));
+      else resolve();
+    });
+    child.stdout?.on('data', () => {
+      try { assertAlive(); } catch (e) { try { child.kill('SIGKILL'); } catch { /* 忽略 */ } reject(e); }
+    });
   });
 }
 
@@ -2190,6 +2244,11 @@ const ROUTES = {
     } else if (operation === 'portrait-matte') {
       options = { background: String(options?.background || 'green') };
       if (!MATTE_BACKGROUNDS.includes(options.background)) return sendError(res, 400, `未知的底色 ${options.background}`, { allowed: MATTE_BACKGROUNDS });
+    } else if (operation === 'region-blur') {
+      const pct = (v, d) => { const n = Number(v); return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : d; };
+      options = { mode: String(options?.mode || 'delogo'), x: pct(options?.x, 70), y: pct(options?.y, 5), w: pct(options?.w, 25), h: pct(options?.h, 15) };
+      if (!REGION_MODES.includes(options.mode)) return sendError(res, 400, `未知的区域处理方式 ${options.mode}`, { allowed: REGION_MODES });
+      if (options.w <= 0 || options.h <= 0) return sendError(res, 400, '区域宽高必须大于 0（按百分比填写）');
     } else {
       options = null;
     }

@@ -40,6 +40,8 @@ export const OPERATIONS = {
   'face-blur': { id: 'face-blur', label: '人脸打码', desc: '自动识别人脸并打码（隐私脱敏）', mode: 'Subtitle', outputExt: '.mp4' },
   // 独立功能：人像抠图（纯色背景）
   'portrait-matte': { id: 'portrait-matte', label: '人像抠图', desc: '抠出人物主体，输出纯色底视频（便于后期换背景）', mode: 'Subtitle', outputExt: '.mp4' },
+  // 独立功能：区域遮挡 / 消物（本地 ffmpeg，固定区域）
+  'region-blur': { id: 'region-blur', label: '区域遮挡', desc: '遮挡或消除画面固定区域内的物体/台标（本地处理，不调云端）', mode: 'Subtitle', outputExt: '.mp4' },
   // 独立功能：压缩 / 转码（平台规格适配）
   'transcode': {
     id: 'transcode',

@@ -38,3 +38,22 @@ export async function probeAvailable() {
   } catch { _available = false; }
   return _available;
 }
+
+/** 探测视频宽高（用于把百分比区域换算成像素） */
+export async function probeVideoSize(filePath) {
+  let stdout;
+  try {
+    ({ stdout } = await run(process.env.FFPROBE_PATH || 'ffprobe', [
+      '-v', 'error', '-protocol_whitelist', 'file,pipe,http,https,tcp,tls',
+      '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', filePath,
+    ], { timeout: 30000, maxBuffer: 1024 * 1024 }));
+  } catch (err) {
+    throw Object.assign(new Error(err.code === 'ENOENT' ? '服务器缺少 ffprobe，请联系管理员安装' : '无法读取视频尺寸'), { status: err.code === 'ENOENT' ? 503 : 422 });
+  }
+  let meta; try { meta = JSON.parse(stdout); } catch { meta = {}; }
+  const s = (meta.streams || [])[0] || {};
+  const width = Number(s.width) || 0;
+  const height = Number(s.height) || 0;
+  if (!width || !height) throw Object.assign(new Error('无法确认视频分辨率'), { status: 422 });
+  return { width, height };
+}

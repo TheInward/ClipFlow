@@ -20,7 +20,8 @@ const el = {
   dropHint: $('#dropHint'), quota: $('#quota'),
   erasePreset: $('#erasePreset'), eraseHint: $('#eraseHint'), modeRow: $('#modeRow'), resRow: $('#resRow'), resSelect: $('#resSelect'), verSelect: $('#verSelect'), batchZip: $('#batchZip'),
   asrRow: $('#asrRow'), asrLang: $('#asrLang'), asrBurn: $('#asrBurn'), tcRow: $('#tcRow'), tcProfile: $('#tcProfile'),
-  moreRow: $('#moreRow'), moreOp: $('#moreOp'), moreMode: $('#moreMode'), moreMask: $('#moreMask'), moreStrength: $('#moreStrength'), moreBg: $('#moreBg'), moreHint: $('#moreHint'),
+  moreRow: $('#moreRow'), moreOp: $('#moreOp'), regionFields: $('#regionFields'), regionMode: $('#regionMode'),
+  regionX: $('#regionX'), regionY: $('#regionY'), regionW: $('#regionW'), regionH: $('#regionH'), moreMode: $('#moreMode'), moreMask: $('#moreMask'), moreStrength: $('#moreStrength'), moreBg: $('#moreBg'), moreHint: $('#moreHint'),
   tabbar: $('#tabbar'), uploadCard: $('#uploadCard'), linkCard: $('#linkCard'), linkInputs: $('#linkInputs'), linkAdd: $('#linkAdd'),
   linkNotice: $('#linkNotice'), pageTitle: $('#pageTitle'), pageDesc: $('#pageDesc'),
   batchCard: $('#batchCard'), batchSub: $('#batchSub'), batchPill: $('#batchPill'), notice: $('#notice'),
@@ -1544,6 +1545,8 @@ function tabPayload() {
     const op = el.moreOp?.value || 'ocr-extract';
     if (op === 'ocr-extract') return { operation: op, options: { mode: el.moreMode?.value || 'Subtitle' } };
     if (op === 'face-blur') return { operation: op, options: { maskMode: el.moreMask?.value || 'mosaic', strength: el.moreStrength?.value || 'medium' } };
+    if (op === 'region-blur') return { operation: op, options: { mode: el.regionMode?.value || 'delogo',
+      x: Number(el.regionX?.value ?? 70), y: Number(el.regionY?.value ?? 5), w: Number(el.regionW?.value ?? 25), h: Number(el.regionH?.value ?? 15) } };
     return { operation: op, options: { background: el.moreBg?.value || 'green' } };
   }
   return { operation: 'erase-subtitle', erasePreset: el.erasePreset?.value || 'standard' };
@@ -1638,11 +1641,14 @@ function syncMoreOptions() {
   show(el.moreMask, op === 'face-blur');
   show(el.moreStrength, op === 'face-blur');
   show(el.moreBg, op === 'portrait-matte');
+  show(el.regionFields, op === 'region-blur');
   if (el.moreHint) {
     el.moreHint.textContent = op === 'ocr-extract'
       ? '识别画面里已烧录的硬字幕，导出带时间戳的 SRT 文稿；按原片秒数计费'
       : op === 'face-blur'
         ? '自动识别人脸并打码（马赛克/高斯模糊），适合隐私脱敏；按原片秒数计费'
+        : op === 'region-blur'
+          ? '在画面固定区域做消除/模糊/色块（适合台标、固定机位里的杂物）；按百分比填写位置；本地处理不消耗云端额度'
         : '抠出人物主体，输出纯色底视频（绿幕最方便后期换背景）；按原片秒数计费';
   }
 }

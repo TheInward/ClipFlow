@@ -27,3 +27,14 @@ export async function probeVideoDuration(filePath) {
   }
   return Math.max(...durations);
 }
+
+let _available = null;
+/** ffprobe 是否可用（结果缓存）：缺它时建批次/开始任务会返回 503 */
+export async function probeAvailable() {
+  if (_available !== null) return _available;
+  try {
+    await run(process.env.FFPROBE_PATH || 'ffprobe', ['-version'], { timeout: 5000, maxBuffer: 1024 * 1024 });
+    _available = true;
+  } catch { _available = false; }
+  return _available;
+}

@@ -20,7 +20,7 @@ import crypto from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { enhanceVideo } from './pipeline.mjs';
-import { probeVideoDuration } from './media.mjs';
+import { probeVideoDuration, probeAvailable } from './media.mjs';
 import { normalizePhone, findUserByPhone, createUser, checkPassword, publicUser, createUserSession, chargeSeconds, refundSeconds, createCodes, redeemCode, ensureAdmin, setPassword, touchSession } from './accounts.mjs';
 import { take as takeToken, stats as rateStats } from './ratelimit.mjs';
 import { fileURLToPath } from 'node:url';
@@ -929,6 +929,7 @@ async function handleUpload(req, res) {
     mime: MIME[ext] || req.headers['content-type'] || 'video/mp4',
     storedPath: path.relative(DATA_DIR, storedPath),
     sha256: sha256.digest('hex'),
+    userId: currentUser(req)?.id || null,
     hits: 1,
     createdAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + UPLOAD_TTL_MS).toISOString(), // 到期时间（UPLOAD_TTL_HOURS 可配）
@@ -1293,6 +1294,13 @@ function assertTaskOwner(task, user) {
   if (user.role !== 'admin' && task.userId !== user.id) throw Object.assign(new Error('任务不存在'), { status: 404 });
 }
 
+/** 源文件的直接操作（删除/处理）只允许上传者本人；无主的历史文件放行 */
+function assertFileAccess(file, user) {
+  if (!user) throw Object.assign(new Error('请重新登录'), { status: 401 });
+  if (user.role === 'admin') return;
+  if (file.userId && file.userId !== user.id) throw Object.assign(new Error('文件不存在'), { status: 404 });
+}
+
 /** All launch routes use the same validation, charge and queue transition. */
 async function startTask(task, user, { force = false } = {}) {
   assertTaskOwner(task, user);
@@ -1617,6 +1625,7 @@ const ROUTES = {
       // 版本号：页面底部展示，便于确认线上跑的是哪次部署
       build: BUILD_ID,
       // 去字幕服务是否可用：只给布尔量与缺失项的中文说明，不含任何密钥
+      probeReady: await probeAvailable(),
       eraseReady: eraseApi.ready,
       eraseMissing: eraseApi.missing.map((m) => (m === 'AMK_API_KEY' ? '去字幕接口密钥' : '公网访问入口')),
       dedupe: { key: 'md5', storage: 'content-addressed', precheck: '/api/uploads/precheck' },
@@ -1903,7 +1912,7 @@ const ROUTES = {
     const eff = applyErasePreset({ preset: body.erasePreset, region: body.eraseRegion, mode: body.eraseMode, model: body.modelVersion });
     const task = createTaskForFile(file, { operation, userId: currentUser(req)?.id, enhance: body.enhance === true, eraseRegion: eff.region, eraseMode: eff.mode, modelVersion: eff.model });
     try { await startTask(task, currentUser(req)); }
-    catch (err) { delete db.tasks[task.id]; saveDb(); throw err; }
+    catch (err) { refundTaskCredits(task, 'refund:failed'); delete db.tasks[task.id]; saveDb(); throw err; }
     console.log(`[task] ${task.id} 去字幕 <- ${file.id}`);
     sendJson(res, 202, { task: serializeTask(task), poll: `/api/tasks/${task.id}` });
   },
@@ -2096,6 +2105,7 @@ const ROUTES = {
   'DELETE /api/files/:id': async (req, res, { params }) => {
     const file = db.files[params.id];
     if (!file) return sendError(res, 404, '文件不存在');
+    assertFileAccess(file, currentUser(req));
     const purge = await purgeContent({ fileId: file.id });
     if (!purge.removedFile) return sendError(res, 409, purge.keptFile || '该文件仍被使用，暂不能清理');
     saveDb();

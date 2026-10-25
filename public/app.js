@@ -242,6 +242,9 @@ async function init() {
   el.buildTag.textContent = state.config.build || '';
   const exts = (state.config.allowedExtensions || []).map((e) => e.slice(1).toUpperCase()).join(' / ');
   el.dropHint.textContent = `支持 ${exts}，单个最大 ${fmtBytes(state.config.maxUploadBytes)}，一批最多 ${state.config.maxBatchSize || 10} 个`;
+  if (state.config.probeReady === false) {
+    setNotice('服务器缺少 ffprobe，无法核实视频时长，任务无法开始。请联系管理员安装（详见部署文档）。');
+  }
   if (state.config.eraseReady === false) {
     setNotice(`去字幕服务尚未就绪（缺少${(state.config.eraseMissing || []).join('、')}），暂时无法开始任务，请联系管理员。`);
   }
@@ -580,7 +583,7 @@ const STATUS_LABEL = {
   hashing: { text: '校验内容（MD5）', cls: 'pill-wait' },
   uploading: { text: '上传中', cls: 'pill-wait' },
   'upload-failed': { text: '上传失败', cls: 'pill-bad' },
-  queued: { text: '排队中（云端）', cls: 'pill-wait' },
+  queued: { text: '排队中', cls: 'pill-wait' },
   running: { text: '处理中', cls: 'pill-run' },
   done: { text: '已完成', cls: 'pill-ok' },
   succeeded: { text: '已完成', cls: 'pill-ok' },
@@ -975,6 +978,7 @@ async function batchAction(kind) {
       toast(`已批量删除 ${res.removed} 项${parts.length ? `：${parts.join(' + ')}` : ''}`
         + `${res.freedBytes ? `（释放 ${fmtBytes(res.freedBytes)}）` : ''}`
         + `${res.kept?.length ? `；${res.kept.length} 项仍被引用，已保留` : ''}`);
+      setNotice('');                     // 删除成功后清掉上次开始失败的提示
       applyBatch(res);
       if (!state.rows.length) {
         clearSaved();
@@ -987,6 +991,7 @@ async function batchAction(kind) {
       return;
     } else {
       const res = await jsonApi(`/api/batches/${state.batchId}`, { method: 'DELETE', body: JSON.stringify({ indexes }) });
+      setNotice('');
       toast(cancelToast(res.cancel, indexes.length));
     }
     startPolling();
@@ -1077,6 +1082,7 @@ function purgeToast(res, fallbackName) {
   return kept ? `已移除该行（${kept}，暂未删除）` : `已移除：${fallbackName}`;
 }
 async function removeRow(r) {
+  if (state.syncing) { toast('正在提交，请稍候再移除'); return; }
   // 批次还没建立（还在上传阶段）→ 纯本地移除，并中断进行中的上传
   if (r.local || !state.batchId) {
     const it = state.items.find((x) => x.key === r.key);

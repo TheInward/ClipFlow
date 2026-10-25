@@ -1523,6 +1523,29 @@ async function runFfmpegFilter(srcPath, destPath, filter, onProgress = () => {},
   });
 }
 
+/** 源视频缩略图（首次请求时用 ffmpeg 截一帧，之后走缓存） */
+const THUMB_DIR = path.join(DATA_DIR, 'thumbs');
+async function ensureThumb(file) {
+  if (!file) return null;
+  const dest = path.join(THUMB_DIR, `${file.id}.jpg`);
+  try { await fsp.access(dest); return dest; } catch { /* 先生成 */ }
+  const src = path.join(DATA_DIR, file.storedPath);
+  const ffmpeg = process.env.FFMPEG_PATH
+    || (process.env.FFPROBE_PATH ? path.join(path.dirname(process.env.FFPROBE_PATH), 'ffmpeg') : 'ffmpeg');
+  try {
+    await fsp.mkdir(THUMB_DIR, { recursive: true });
+    const { execFile } = await import('node:child_process');
+    await new Promise((resolve, reject) => {
+      execFile(ffmpeg, ['-y', '-ss', '0.6', '-i', src, '-frames:v', '1', '-vf', 'scale=480:-2', '-q:v', '6', dest],
+        { timeout: 30000 }, (err, _o, se) => (err ? reject(new Error(String(se || err.message).slice(-160))) : resolve()));
+    });
+    return dest;
+  } catch (err) {
+    console.warn('[thumb]', file.id, err.message);
+    return null;
+  }
+}
+
 /** 源文件的直接操作（删除/处理）只允许上传者本人；无主的历史文件放行 */
 function assertFileAccess(file, user) {
   if (!user) throw Object.assign(new Error('请重新登录'), { status: 401 });
@@ -2572,7 +2595,7 @@ const ROUTES = {
         id: `file:${f.id}`, fileId: f.id, kind: 'video', source: 'upload',
         name: f.name, size: f.size || 0, sizeText: formatBytes(f.size || 0),
         createdAt: f.createdAt, expiresAt: f.expiresAt || null,
-        url: `/f/${f.id}`,
+        url: `/f/${f.id}`, thumbUrl: `/api/thumb/file/${f.id}`,
       });
     }
     for (const t of Object.values(db.tasks || {})) {
@@ -2587,6 +2610,17 @@ const ROUTES = {
     out.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
     const totalBytes = out.reduce((sum, x) => sum + (Number(x.size) || 0), 0);
     sendJson(res, 200, { assets: out, total: out.length, totalBytes, totalText: formatBytes(totalBytes) });
+  },
+
+  /** 源文件缩略图（懒生成 + 磁盘缓存） */
+  'GET /api/thumb/file/:id': async (req, res, { params }) => {
+    const file = db.files[params.id];
+    if (!file) return sendError(res, 404, '文件不存在');
+    const me = currentUser(req);
+    if (me && me.role !== 'admin' && file.userId && file.userId !== me.id) return sendError(res, 404, '文件不存在');
+    const dest = await ensureThumb(file);
+    if (!dest) return sendError(res, 422, '缩略图生成失败');
+    serveFile(req, res, dest, { mime: 'image/jpeg', cache: 'public, max-age=3600' });
   },
 
   'DELETE /api/files/:id': async (req, res, { params }) => {

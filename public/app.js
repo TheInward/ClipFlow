@@ -23,7 +23,8 @@ const el = {
   moreRow: $('#moreRow'), moreOp: $('#moreOp'), regionFields: $('#regionFields'), regionMode: $('#regionMode'),
   regionX: $('#regionX'), regionY: $('#regionY'), regionW: $('#regionW'), regionH: $('#regionH'), moreMode: $('#moreMode'), moreMask: $('#moreMask'), moreStrength: $('#moreStrength'), moreBg: $('#moreBg'), moreHint: $('#moreHint'),
   tabbar: $('#tabbar'), navMain: $('#navMain'), assetFilters: $('#assetFilters'), assetGrid: $('#assetGrid'),
-  assetEmpty: $('#assetEmpty'), assetTotal: $('#assetTotal'), cntAll: $('#cntAll'), cntVideo: $('#cntVideo'), cntText: $('#cntText'),
+  assetEmpty: $('#assetEmpty'), assetTotal: $('#assetTotal'), assetSearch: $('#assetSearch'), assetBulk: $('#assetBulk'),
+  assetSelAll: $('#assetSelAll'), assetSelNote: $('#assetSelNote'), assetBulkDelete: $('#assetBulkDelete'),
   studioSend: $('#studioSend'), studioNotice: $('#studioNotice'), plansRedeem: $('#plansRedeem'), uploadCard: $('#uploadCard'), linkCard: $('#linkCard'), linkInputs: $('#linkInputs'), linkAdd: $('#linkAdd'),
   linkNotice: $('#linkNotice'), pageTitle: $('#pageTitle'), pageDesc: $('#pageDesc'),
   batchCard: $('#batchCard'), batchSub: $('#batchSub'), batchPill: $('#batchPill'), notice: $('#notice'),
@@ -1755,6 +1756,9 @@ function switchPage(page) {
   }
 }
 
+let assetSearch = '';
+let assetSel = new Set();
+
 async function loadAssets() {
   if (!el.assetGrid) return;
   try {
@@ -1764,52 +1768,119 @@ async function loadAssets() {
     assetList = [];
     toast(`资产加载失败：${err.message}`);
   }
-  const cnt = (kind) => assetList.filter((a) => kind === 'all' || a.kind === kind).length;
-  if (el.cntAll) el.cntAll.textContent = cnt('all');
-  if (el.cntVideo) el.cntVideo.textContent = cnt('video');
-  if (el.cntText) el.cntText.textContent = cnt('text');
-  if (el.assetTotal) el.assetTotal.textContent = `共 ${assetList.length} 项`;
-  const list = assetList.filter((a) => assetKind === 'all' || a.kind === assetKind);
-  el.assetGrid.innerHTML = '';
+  renderAssetFilters();
+  renderAssets();
+}
+
+function assetKindLabel(kind) {
+  return ({ video: '视频', text: '文案', image: '图片', audio: '音频' })[kind] || kind;
+}
+function assetMatches(a) {
+  if (assetKind !== 'all' && a.kind !== assetKind) return false;
+  if (assetSearch && !String(a.name || '').toLowerCase().includes(assetSearch.toLowerCase())) return false;
+  return true;
+}
+
+function renderAssetFilters() {
+  if (!el.assetFilters) return;
+  const kinds = ['all', 'video', 'image', 'audio', 'text'];
+  el.assetFilters.innerHTML = kinds.map((k) => {
+    const n = k === 'all' ? assetList.length : assetList.filter((a) => a.kind === k).length;
+    if (k !== 'all' && n === 0) return '';
+    return `<button class="cchip ${assetKind === k ? 'on' : ''}" type="button" data-kind="${k}">${k === 'all' ? '全部' : assetKindLabel(k)} <span class="cnt">${n}</span></button>`;
+  }).join('');
+}
+
+const ASSET_ICON = { video: '▶', text: 'T', audio: '♫', image: '▣' };
+
+function renderAssets() {
+  if (!el.assetGrid) return;
+  const list = assetList.filter(assetMatches);
+  const totalBytes = list.reduce((s2, a) => s2 + (Number(a.size) || 0), 0);
+  if (el.assetTotal) el.assetTotal.textContent = `共 ${list.length} 项 · ${fmtBytes(totalBytes)}`;
   el.assetEmpty.hidden = list.length > 0;
-  const ICON = { video: '▶', text: 'T', audio: '♫', image: '▣' };
+  el.assetGrid.innerHTML = '';
   for (const a of list) {
     const card = document.createElement('div');
-    card.className = 'asset';
+    card.className = 'asset' + (assetSel.has(a.id) ? ' sel' : '');
+    const thumb = a.thumbUrl
+      ? `<img src="${a.thumbUrl}" alt="" loading="lazy" onerror="this.style.display='none'" />`
+      : ASSET_ICON[a.kind] || '▶';
     card.innerHTML = `
-      <div class="a-thumb">${ICON[a.kind] || '▶'}<span class="a-badge">${a.source === 'upload' ? '上传' : '处理'}</span></div>
+      <div class="a-thumb">${thumb}<span class="a-badge">${a.source === 'upload' ? '上传' : '处理'}</span>
+        <span class="a-kind">${assetKindLabel(a.kind)}</span>
+        <span class="a-check ${assetSel.has(a.id) ? 'on' : ''}"></span></div>
       <div class="a-name" title="${escapeHtml(a.name || '')}">${escapeHtml(a.name || '')}</div>
       <div class="a-meta">${a.kind === 'text' ? '字幕/文稿' : (a.remote ? '云端保存' : '本地保存')}${a.sizeText ? ' · ' + a.sizeText : ''}</div>
       <div class="a-date">${a.createdAt ? new Date(a.createdAt).toLocaleString('zh-CN', { hour12: false }) : ''}</div>
       <div class="a-acts"></div>`;
+    card.querySelector('.a-thumb').addEventListener('click', () => toggleAssetSel(a.id));
     const acts = card.querySelector('.a-acts');
-    const dl = document.createElement(a.downloadUrl ? 'a' : 'button');
-    dl.textContent = '下载';
     if (a.downloadUrl) {
-      dl.href = a.downloadUrl;
-    } else {
-      dl.addEventListener('click', () => { window.location.href = a.url; });
+      const link = document.createElement('a');
+      link.href = a.downloadUrl; link.textContent = '下载'; link.download = '';
+      acts.appendChild(link);
+    } else if (a.url) {
+      const link = document.createElement('a');
+      link.href = a.url; link.textContent = '下载'; link.download = ''; link.target = '_blank';
+      acts.appendChild(link);
     }
-    acts.appendChild(dl);
-    const open = document.createElement('button');
-    open.textContent = '去处理';
-    open.addEventListener('click', () => {
-      switchPage('tools');
-      toast('已切到工具页：请上传或选择文件后处理');
-    });
-    acts.appendChild(open);
     if (a.source === 'upload' && a.fileId) {
       const del = document.createElement('button');
-      del.textContent = '删除';
-      del.addEventListener('click', async () => {
-        if (!confirm(`删除资产「${a.name}」？若仍被任务引用会保留。`)) return;
-        try { await jsonApi(`/api/files/${a.fileId}`, { method: 'DELETE' }); toast('已删除'); loadAssets(); }
-        catch (err) { toast(`删除失败：${err.message}`); }
-      });
+      del.type = 'button'; del.textContent = '删除';
+      del.addEventListener('click', (e) => { e.stopPropagation(); deleteAssets([a]); });
       acts.appendChild(del);
     }
     el.assetGrid.appendChild(card);
   }
+  if (el.assetBulk) el.assetBulk.hidden = list.length === 0;
+  updateAssetSel();
+}
+
+function toggleAssetSel(id) {
+  if (assetSel.has(id)) assetSel.delete(id); else assetSel.add(id);
+  renderAssets();
+}
+function updateAssetSel() {
+  if (!el.assetBulk) return;
+  const list = assetList.filter(assetMatches);
+  if (el.assetSelNote) el.assetSelNote.textContent = `已选 ${assetSel.size} 项`;
+  if (el.assetSelAll) {
+    el.assetSelAll.checked = list.length > 0 && list.every((a) => assetSel.has(a.id));
+  }
+  if (el.assetBulkDelete) el.assetBulkDelete.disabled = assetSel.size === 0;
+}
+
+async function deleteAssets(items) {
+  const removable = items.filter((a) => a.source === 'upload' && a.fileId);
+  const skipped = items.length - removable.length;
+  if (!removable.length) { toast('选中的是处理产物，暂不支持删除'); return; }
+  if (!confirm(`删除 ${removable.length} 个上传素材？仍被任务引用的会保留。${skipped ? `（${skipped} 个产物跳过）` : ''}`)) return;
+  let ok = 0;
+  for (const a of removable) {
+    try { await jsonApi(`/api/files/${a.fileId}`, { method: 'DELETE' }); ok += 1; assetSel.delete(a.id); }
+    catch { /* 被引用，保留 */ }
+  }
+  toast(`已删除 ${ok} 个${skipped ? `，跳过 ${skipped} 个` : ''}`);
+  await loadAssets();
+}
+
+if (el.assetSearch) {
+  el.assetSearch.addEventListener('input', () => { assetSearch = el.assetSearch.value.trim(); renderAssets(); });
+}
+if (el.assetSelAll) {
+  el.assetSelAll.addEventListener('change', () => {
+    const list = assetList.filter(assetMatches);
+    if (el.assetSelAll.checked) list.forEach((a) => assetSel.add(a.id));
+    else assetSel.clear();
+    renderAssets();
+  });
+}
+if (el.assetBulkDelete) {
+  el.assetBulkDelete.addEventListener('click', () => {
+    const items = assetList.filter((a) => assetSel.has(a.id));
+    deleteAssets(items);
+  });
 }
 
 if (el.navMain) {

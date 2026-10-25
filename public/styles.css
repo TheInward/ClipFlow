@@ -894,3 +894,23 @@ body{background:var(--canvas)}
 #list .row{border-top:1px solid var(--line-2)}
 #list .row:hover{background:#fafafb}
 @media (max-width:1100px){ .ws2{grid-template-columns:minmax(0,1fr)} .ws2 > #uploadCard{position:static} }
+
+/* ---------- 资产进阶 ---------- */
+.asset{padding:0}
+.asset .a-check{position:absolute;top:10px;right:10px;z-index:3;width:20px;height:20px;border-radius:6px;
+  border:1px solid rgba(255,255,255,.6);background:rgba(255,255,255,.85);display:grid;place-items:center;cursor:pointer}
+.asset .a-check.on{background:#111;border-color:#111;color:#fff}
+.asset .a-check.on::after{content:"✓";font-size:11px;line-height:1}
+.asset .a-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.asset .a-thumb .a-kind{position:absolute;left:10px;bottom:10px;font:600 9.5px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;
+  color:#fff;background:rgba(10,10,12,.72);padding:4px 7px;border-radius:6px}
+.asset.sel{border-color:#111;box-shadow:inset 0 0 0 1px #111}
+.asset-bulk{display:flex;align-items:center;gap:14px;margin:0 0 14px;padding:10px 14px;background:#fff;border:1px solid var(--line);border-radius:12px;
+  position:sticky;top:70px;z-index:5}
+.asset-bulk .sel-all{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2);cursor:pointer}
+.asset-bulk .bulk-actions{margin-left:auto;display:flex;gap:8px}
+.asset-bulk .btn{height:30px;padding:0 12px;font-size:12.5px;border-radius:9px}
+.search2{height:32px;width:200px;border:1px solid var(--line);border-radius:999px;padding:0 14px;font-size:12.5px;outline:none;background:#fff}
+.search2:focus{border-color:#b9b9c0;box-shadow:0 0 0 3px rgba(10,10,12,.05)}
+.a-acts{display:none}
+.asset:hover .a-acts{display:flex}

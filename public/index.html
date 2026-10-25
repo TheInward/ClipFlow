@@ -340,12 +340,18 @@
           <p>上传的素材与处理完成的作品，统一在这里管理。</p>
         </div>
         <div class="asset-bar">
-          <div class="filters" id="assetFilters">
-            <button class="cchip on" type="button" data-kind="all">全部 <span class="cnt" id="cntAll">0</span></button>
-            <button class="cchip" type="button" data-kind="video">视频 <span class="cnt" id="cntVideo">0</span></button>
-            <button class="cchip" type="button" data-kind="text">文案 <span class="cnt" id="cntText">0</span></button>
+          <div class="filters" id="assetFilters"></div>
+          <div class="asset-tools">
+            <input class="search2" id="assetSearch" placeholder="搜索资产名称…" />
+            <span class="asset-total" id="assetTotal">共 0 项</span>
           </div>
-          <span class="asset-total" id="assetTotal">共 0 项</span>
+        </div>
+        <div class="asset-bulk" id="assetBulk" hidden>
+          <label class="sel-all"><input type="checkbox" id="assetSelAll" /> 全选</label>
+          <span class="muted" id="assetSelNote">已选 0 项</span>
+          <div class="bulk-actions">
+            <button class="btn btn-ghost" type="button" id="assetBulkDelete">批量删除</button>
+          </div>
         </div>
         <div class="asset-grid" id="assetGrid"></div>
         <div class="notice" id="assetEmpty" hidden>还没有资产：先在「工具」里上传并处理一个视频。</div>

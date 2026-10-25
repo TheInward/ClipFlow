@@ -2141,6 +2141,10 @@ const ROUTES = {
     let parsed;
     try { parsed = new URL(rawUrl); } catch { return sendError(res, 400, '链接格式不正确，请粘贴完整的 http/https 地址'); }
     if (!/^https?:$/.test(parsed.protocol)) return sendError(res, 400, '只支持 http:// 或 https:// 的视频直链');
+    // 抖音/快手等分享短链：页面地址由 JS + 签名动态生成，纯服务端抓不到真实视频地址
+    if (/^(?:v\.douyin\.com|www\.iesdouyin\.com|v\.kuaishou\.com|www\.kuaishou\.com|xiaohongshu\.com|www\.xiaohongshu\.com|bilibili\.com|b23\.tv)$/i.test(parsed.hostname)) {
+      return sendError(res, 400, '暂不支持该平台的分享链接：抖音/快手/小红书等页面的视频地址由浏览器动态生成，服务端无法直接获取。请先在 App 里「保存到本地」，再到「去字幕」上传视频。');
+    }
     let base = 'video.mp4';
     try { base = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() || 'video.mp4'); } catch { /* 保持默认 */ }
     const name = sanitizeName(base) || 'video.mp4';

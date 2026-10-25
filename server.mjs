@@ -1618,6 +1618,40 @@ function serializeBatch(batch) {
 /** 去字幕接口配置（未配置时任务会被拒绝，不会有任何替代实现） */
 const eraseApi = eraseApiConfig();
 
+/** 解析并校验一个「视频直链」，返回 { url, name, ext } 或抛出带 status 的错误 */
+function parseVideoUrl(rawUrl) {
+  const raw = String(rawUrl || '').trim();
+  let parsed;
+  try { parsed = new URL(raw); } catch { throw Object.assign(new Error('链接格式不正确，请粘贴完整的 http/https 地址'), { status: 400 }); }
+  if (!/^https?:$/.test(parsed.protocol)) throw Object.assign(new Error('只支持 http:// 或 https:// 的视频直链'), { status: 400 });
+  // 抖音/快手等分享短链：页面地址由 JS + 签名动态生成，纯服务端抓不到真实视频地址
+  if (/^(?:v\.douyin\.com|www\.iesdouyin\.com|v\.kuaishou\.com|www\.kuaishou\.com|xiaohongshu\.com|www\.xiaohongshu\.com|bilibili\.com|b23\.tv)$/i.test(parsed.hostname)) {
+    throw Object.assign(new Error('暂不支持该平台的分享链接：抖音/快手/小红书等页面的视频地址由浏览器动态生成，服务端无法直接获取。请先在 App 里「保存到本地」，再到「去字幕」上传视频。'), { status: 400 });
+  }
+  let base = 'video.mp4';
+  try { base = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() || 'video.mp4'); } catch { /* 保持默认 */ }
+  const name = sanitizeName(base) || 'video.mp4';
+  const ext = (path.extname(name) || '').toLowerCase();
+  if (!VIDEO_EXT.has(ext)) {
+    throw Object.assign(new Error(`链接文件类型 ${ext || '(无扩展名)'} 不受支持；请使用直链（.mp4/.mov/.mkv/.avi/.flv/.ts/.wmv）`), { status: 415 });
+  }
+  return { url: raw, name, ext };
+}
+
+/** 用链接建一个任务（源文件不上传，云端直接拉取该地址） */
+function createUrlTask(urlInfo, user, eff) {
+  const task = createTaskForFile(
+    { id: null, name: urlInfo.name, size: 0, ext: urlInfo.ext, durationSec: null, durationVerified: false,
+      createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + UPLOAD_TTL_MS).toISOString() },
+    { operation: DEFAULT_OPERATION, userId: user.id, eraseRegion: eff.region, eraseMode: eff.mode, modelVersion: eff.model },
+  );
+  task.fileId = null;
+  task.sourceUrl = urlInfo.url;
+  task.erasePreset = eff.preset;
+  db.tasks[task.id] = task;
+  return task;
+}
+
 const ROUTES = {
   'GET /api/config': async (req, res) => {
     sendJson(res, 200, {
@@ -2174,6 +2208,52 @@ const ROUTES = {
     catch (err) { refundTaskCredits(task, 'refund:failed'); delete db.tasks[task.id]; saveDb(); throw err; }
     console.log(`[task] ${task.id} 链接去水印 <- ${rawUrl}（${duration.toFixed(1)}s）`);
     sendJson(res, 202, { task: serializeTask(task), poll: `/api/tasks/${task.id}` });
+  },
+
+  /** 链接去水印（批量）：一次粘贴多条直链，建成一个批次，随后用「批量开始」统一启动 */
+  'POST /api/batches/from-urls': async (req, res) => {
+    if (!eraseApi.ready) {
+      return sendError(res, 503, '去字幕服务尚未就绪，请联系管理员开通后再试', { endpoint: eraseApi.endpoint, missing: eraseApi.missing });
+    }
+    const body = await readJsonBody(req);
+    const rawList = Array.isArray(body.urls) ? body.urls : String(body.urls || '').split(/[\s,，]+/);
+    const urls = [...new Set(rawList.map((u) => String(u || '').trim()).filter(Boolean))];
+    if (!urls.length) return sendError(res, 400, '请至少粘贴一个视频链接');
+    if (urls.length > MAX_BATCH_SIZE) return sendError(res, 400, `一批最多 ${MAX_BATCH_SIZE} 个链接（当前 ${urls.length} 个）`, { maxBatchSize: MAX_BATCH_SIZE });
+    const dg = diskGuard();
+    if (!dg.ok) return sendError(res, 507, diskLowMessage(dg.free), { freeBytes: dg.free, minFreeBytes: dg.minFree });
+    const me = currentUser(req);
+    if (!me) return sendError(res, 401, '请重新登录');
+
+    const eff = applyErasePreset({ preset: 'fullscreen' });
+    const batch = {
+      id: id('batch'), createdAt: new Date().toISOString(), operation: DEFAULT_OPERATION,
+      erasePreset: eff.preset, enhance: false, resolution: null, userId: me.id, taskIds: [], items: [],
+    };
+    const skipped = [];
+    const created = [];
+    for (const raw of urls) {
+      let info;
+      try { info = parseVideoUrl(raw); }
+      catch (err) { skipped.push({ url: raw, reason: err.message }); continue; }
+      let duration;
+      try { duration = await probePool.run(() => probeVideoDuration(info.url)); }
+      catch (err) { skipped.push({ url: raw, reason: `无法读取视频信息：${err.message}` }); continue; }
+      const task = createUrlTask(info, me, eff);
+      task.durationSec = duration;
+      task.durationVerified = true;
+      task.estimatedSeconds = Math.max(MIN_ESTIMATE_SEC, Math.round(duration * currentRtf(task.mode)));
+      task.etaSeconds = task.estimatedSeconds;
+      task.sourceExpiresAt = task.sourceExpiresAt || null;
+      batch.items.push({ fileId: null, taskId: task.id, shared: false, reused: false, attached: false, sharedWithFileId: null });
+      if (!batch.taskIds.includes(task.id)) batch.taskIds.push(task.id);
+      created.push(task.id);
+    }
+    if (!batch.items.length) return sendError(res, 422, '没有可处理的链接', { skipped });
+    db.batches[batch.id] = batch;
+    saveDb();
+    console.log(`[batch] ${batch.id} 链接批次：${created.length} 个链接，跳过 ${skipped.length} 个`);
+    sendJson(res, 202, { ...serializeBatch(batch), skipped, poll: `/api/batches/${batch.id}` });
   },
 
   'DELETE /api/files/:id': async (req, res, { params }) => {

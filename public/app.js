@@ -19,8 +19,8 @@ const el = {
   uploadCard: $('#uploadCard'), dropzone: $('#dropzone'), fileInput: $('#fileInput'),
   dropHint: $('#dropHint'), quota: $('#quota'),
   erasePreset: $('#erasePreset'), eraseHint: $('#eraseHint'), modeRow: $('#modeRow'), resRow: $('#resRow'), resSelect: $('#resSelect'),
-  tabbar: $('#tabbar'), uploadCard: $('#uploadCard'), linkCard: $('#linkCard'), linkInput: $('#linkInput'), linkStart: $('#linkStart'),
-  linkNotice: $('#linkNotice'), linkList: $('#linkList'), pageTitle: $('#pageTitle'), pageDesc: $('#pageDesc'),
+  tabbar: $('#tabbar'), uploadCard: $('#uploadCard'), linkCard: $('#linkCard'), linkInputs: $('#linkInputs'), linkAdd: $('#linkAdd'),
+  linkNotice: $('#linkNotice'), pageTitle: $('#pageTitle'), pageDesc: $('#pageDesc'),
   batchCard: $('#batchCard'), batchSub: $('#batchSub'), batchPill: $('#batchPill'), notice: $('#notice'),
   diskWarn: $('#diskWarn'),
   bigDone: $('#bigDone'), cDone: $('#cDone'), cRun: $('#cRun'), cUp: $('#cUp'),
@@ -44,7 +44,7 @@ const state = {
   pollTimer: null,
   tickTimer: null,
   tab: 'erase',                       // erase | enhance | link
-  tabBatch: { erase: null, enhance: null },
+  tabBatch: { erase: null, enhance: null, link: null },
   linkTasks: [],                      // 链接去水印创建的任务
 };
 
@@ -1565,108 +1565,56 @@ async function setTab(tab) {
   state.batchId = state.tabBatch[tab] || null;
   state.batch = null;
   state.rows = [];
-  if (el.batchCard) el.batchCard.hidden = isLink || !state.batchId;
-  if (!isLink && state.batchId) {
+  if (el.batchCard) el.batchCard.hidden = !state.batchId;
+  if (state.batchId) {
     try { applyBatch(await jsonApi(`/api/batches/${state.batchId}`)); startPolling(); }
     catch { state.batchId = null; clearSaved(); }
   }
   render();
-  if (isLink) renderLinkTasks();
 }
 
-/* ------------------------------- 链接去水印 ------------------------------- */
-const LINK_STATUS = { pending: '排队中', processing: '处理中', succeeded: '已完成', failed: '失败', canceled: '已取消' };
-
-function renderLinkTasks() {
-  if (!el.linkList) return;
-  el.linkList.innerHTML = '';
-  if (!state.linkTasks.length) {
-    const empty = document.createElement('div');
-    empty.className = 'hint';
-    empty.textContent = '还没有任务：粘贴链接后点「开始处理」。';
-    el.linkList.appendChild(empty);
-    return;
-  }
-  for (const t of state.linkTasks) {
-    const row = document.createElement('div');
-    row.className = 'row';
-    const info = document.createElement('div');
-    info.className = 'row-main';
-    const name = document.createElement('div');
-    name.className = 'row-name';
-    name.textContent = t.fileName || t.sourceUrl || '（链接任务）';
-    const meta = document.createElement('div');
-    meta.className = 'row-meta';
-    const pct = t.status === 'processing' ? ` ${t.progress || 0}%` : '';
-    meta.textContent = `${LINK_STATUS[t.status] || t.status}${pct}${t.error ? ` · ${t.error}` : ''}`;
-    info.append(name, meta);
-    row.appendChild(info);
-    const actions = document.createElement('div');
-    actions.className = 'row-actions';
-    if (t.status === 'succeeded') {
-      const a = document.createElement('a');
-      a.className = 'btn btn-primary';
-      a.href = `/api/download/${t.id}`;
-      a.textContent = '下载';
-      actions.appendChild(a);
-    }
-    if (t.status === 'pending' || t.status === 'processing') {
-      const b = document.createElement('button');
-      b.className = 'btn btn-ghost btn-stop';
-      b.type = 'button';
-      b.textContent = '取消';
-      b.addEventListener('click', async () => {
-        try { await jsonApi(`/api/tasks/${t.id}`, { method: 'DELETE' }); toast('已取消'); }
-        catch (err) { toast(`取消失败：${err.message}`); }
-      });
-      actions.appendChild(b);
-    }
-    row.appendChild(actions);
-    el.linkList.appendChild(row);
-  }
-}
-
-let linkPollTimer = null;
-function startLinkPolling() {
-  clearInterval(linkPollTimer);
-  linkPollTimer = setInterval(async () => {
-    const active = state.linkTasks.filter((t) => t.status === 'pending' || t.status === 'processing');
-    if (!active.length) { clearInterval(linkPollTimer); linkPollTimer = null; return; }
-    await Promise.all(active.map(async (t) => {
-      try {
-        const res = await jsonApi(`/api/tasks/${t.id}`);
-        Object.assign(t, res.task || {});
-      } catch { /* 忽略单条失败 */ }
-    }));
-    renderLinkTasks();
-  }, 2500);
-}
-
-async function startLinkTask() {
-  const url = String(el.linkInput?.value || '').trim();
+/* ------------------------------- 链接去水印 -------------------------------
+ * 与「去字幕 / 超清」共用批次列表：一次粘贴多条直链 → 建成一个链接批次 →
+ * 用「批量开始 / 批量取消 / 批量删除」统一操作，也可以在行内单独控制。
+ */
+async function addLinkBatch() {
+  const raw = String(el.linkInputs?.value || '');
+  const urls = [...new Set(raw.split(/[\s,，]+/).map((x) => x.trim()).filter(Boolean))];
   if (el.linkNotice) el.linkNotice.hidden = true;
-  if (!/^https?:\/\/\S+$/i.test(url)) {
-    if (el.linkNotice) { el.linkNotice.textContent = '请输入以 http:// 或 https:// 开头的视频直链'; el.linkNotice.hidden = false; }
+  if (!urls.length) {
+    if (el.linkNotice) { el.linkNotice.textContent = '请先粘贴至少一个视频直链（每行一个）'; el.linkNotice.hidden = false; }
     return;
   }
-  if (!markBusy(el.linkStart, '正在提交…')) return;
+  if (!markBusy(el.linkAdd, '正在解析…')) return;
   try {
-    const res = await jsonApi('/api/tasks/from-url', { method: 'POST', timeoutMs: 120000, body: JSON.stringify({ url }) });
-    el.linkInput.value = '';
-    state.linkTasks.unshift(res.task);
-    renderLinkTasks();
-    startLinkPolling();
-    toast('已提交处理');
+    const res = await jsonApi('/api/batches/from-urls', { method: 'POST', timeoutMs: 900000, body: JSON.stringify({ urls }) });
+    el.linkInputs.value = '';
+    state.tabBatch.link = res.batch.id;
+    state.batchId = res.batch.id;
+    applyBatch(res);
+    // 新添加的链接默认全部勾选，方便直接点「批量开始」
+    const fresh = viewRows().filter((r) => r.status === 'idle');
+    fresh.forEach((r) => state.selected.add(r.key));
+    render();
+    startPolling();
+    if (el.batchCard) el.batchCard.hidden = false;
+    const skipped = res.skipped || [];
+    if (skipped.length) {
+      setNotice(`已添加 ${res.items.length} 个链接，${skipped.length} 个被跳过：${skipped.slice(0, 3).map((s) => s.reason).join('；')}${skipped.length > 3 ? ' …' : ''}`);
+    } else {
+      setNotice('');
+    }
+    toast(`已添加 ${res.items.length} 个链接，可点「批量开始」`);
   } catch (err) {
-    if (el.linkNotice) { el.linkNotice.textContent = `处理失败：${err.message}`; el.linkNotice.hidden = false; }
+    if (el.linkNotice) { el.linkNotice.textContent = `添加失败：${err.message}`; el.linkNotice.hidden = false; }
   } finally {
-    clearBusy(el.linkStart);
+    clearBusy(el.linkAdd);
   }
 }
 
 if (el.tabbar) el.tabbar.addEventListener('click', (e) => { const b = e.target.closest('.tab'); if (b) setTab(b.dataset.tab); });
-if (el.linkStart) el.linkStart.addEventListener('click', startLinkTask);
-if (el.linkInput) el.linkInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); startLinkTask(); } });
+if (el.linkAdd) el.linkAdd.addEventListener('click', addLinkBatch);
+if (el.linkInputs) el.linkInputs.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); addLinkBatch(); } });
 
 el.fileInput.addEventListener('change', () => { acceptFiles(el.fileInput.files); el.fileInput.value = ''; });
 ['dragenter', 'dragover'].forEach((ev) => el.dropzone.addEventListener(ev, (e) => { e.preventDefault(); el.dropzone.classList.add('is-drag'); }));

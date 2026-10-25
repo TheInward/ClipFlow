@@ -154,13 +154,12 @@
             <p class="muted">支持公网视频直链（.mp4 / .mov / .mkv / .avi / .flv / .ts / .wmv），视频无需上传到本服务器。</p>
           </div>
         </div>
+        <textarea id="linkInputs" class="url-input url-area" rows="4" placeholder="每行粘贴一个视频直链，例如：\nhttps://example.com/a.mp4\nhttps://cdn.example.com/b.mov"></textarea>
         <div class="url-row">
-          <input id="linkInput" class="url-input" type="url" inputmode="url" placeholder="https://example.com/video.mp4" autocomplete="off" />
-          <button class="btn btn-primary" id="linkStart" type="button">开始处理</button>
+          <span class="hint" id="linkHint">每行一个链接，最多 30 个；处理方式为全屏模式擦除文字与文字水印。抖音/快手等分享短链暂不支持（页面地址由 JS 动态生成），请先保存视频后到「去字幕」上传。</span>
+          <button class="btn btn-primary" id="linkAdd" type="button">添加链接</button>
         </div>
-        <div class="hint" id="linkHint">处理方式：全屏模式擦除画面中的文字与文字水印；抖音/快手等分享短链暂不支持（页面由 JS 动态生成地址），请先保存视频后到「去字幕」上传。</div>
         <div class="notice notice-danger" id="linkNotice" hidden></div>
-        <div class="list" id="linkList"></div>
       </section>
     </main>
 

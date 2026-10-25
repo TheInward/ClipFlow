@@ -559,7 +559,7 @@ export async function runAsr(videoUrl, { language = null, taskId = null, onSubmi
     const d = unwrap(r.json);
     const status = String(d.field(['status']) || '').toLowerCase();
     if (['completed', 'succeeded', 'success'].includes(status)) {
-      const items = Array.isArray(d.root?.result?.subtitles) ? d.root.result.subtitles : [];
+      const items = Array.isArray(d.result?.subtitles) ? d.result.subtitles : [];
       if (!items.length) throw new Error('没有识别出语音内容（视频可能没有人声）');
       return { taskId, subtitles: items.map((s) => ({
         start: Number(s.start_time ?? s.startTime ?? 0),
@@ -622,10 +622,10 @@ export async function runTranscode(videoUrl, { profile = '1080p', taskId = null,
     const d = unwrap(r.json);
     const status = String(d.field(['status']) || '').toLowerCase();
     if (['completed', 'succeeded', 'success'].includes(status)) {
-      const url = d.field(['result', 'video_url']);
+      const url = pick(d.result, OUT_KEYS) || d.field(OUT_KEYS);
       if (!url) throw new Error('转码完成但没有产物地址');
       const size = await remoteSize(url);
-      return { url, size, duration: Number(d.field(['result', 'duration'])) || 0, resolution: d.field(['result', 'resolution']) || null, taskId, elapsedSeconds: Math.round((Date.now() - started) / 1000) };
+      return { url, size, duration: Number(d.result?.duration ?? d.field(['duration'])) || 0, resolution: d.result?.resolution ?? d.field(['resolution']) ?? null, taskId, elapsedSeconds: Math.round((Date.now() - started) / 1000) };
     }
     if (['failed', 'failure', 'error'].includes(status)) {
       throw new Error(`转码失败：${d.field(['error', 'message']) || status}`);
@@ -663,10 +663,10 @@ export async function runToolVideo(tool, videoUrl, extraBody = {}, { taskId = nu
     const d = unwrap(r.json);
     const status = String(d.field(['status']) || '').toLowerCase();
     if (['completed', 'succeeded', 'success'].includes(status)) {
-      const url = d.field(['result', 'video_url']);
+      const url = pick(d.result, OUT_KEYS) || d.field(OUT_KEYS);
       if (!url) throw new Error(`${tool} 完成但没有产物地址`);
       const size = await remoteSize(url);
-      return { url, size, duration: Number(d.field(['result', 'duration'])) || 0, taskId, elapsedSeconds: Math.round((Date.now() - started) / 1000) };
+      return { url, size, duration: Number(d.result?.duration ?? d.field(['duration'])) || 0, taskId, elapsedSeconds: Math.round((Date.now() - started) / 1000) };
     }
     if (['failed', 'failure', 'error'].includes(status)) {
       throw new Error(`${tool} 失败：${d.field(['error', 'message']) || status}`);
@@ -704,7 +704,7 @@ export async function runOcr(videoUrl, { mode = 'Subtitle', taskId = null, onSub
     const d = unwrap(r.json);
     const status = String(d.field(['status']) || '').toLowerCase();
     if (['completed', 'succeeded', 'success'].includes(status)) {
-      const items = Array.isArray(d.root?.result?.subtitles) ? d.root.result.subtitles : [];
+      const items = Array.isArray(d.result?.subtitles) ? d.result.subtitles : [];
       if (!items.length) throw new Error('画面里没有识别到文字');
       return { taskId, subtitles: items.map((s) => ({ start: Number(s.start_time ?? 0), end: Number(s.end_time ?? 0), text: String(s.subtitle_text ?? '') })), elapsedSeconds: Math.round((Date.now() - started) / 1000) };
     }

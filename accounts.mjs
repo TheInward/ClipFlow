@@ -7,7 +7,7 @@
  */
 import crypto from 'node:crypto';
 
-const SESSION_TTL_MS = 60 * 60 * 1000;          // 每次调用接口都会续期，最后一次调用后 1 小时失效
+export const SESSION_TTL_MS = 60 * 60 * 1000;   // 每次调用接口都会续期，最后一次调用后 1 小时失效
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';  // 去掉易混字符
 
 const nowIso = () => new Date().toISOString();
@@ -69,6 +69,7 @@ export function publicUser(user) {
     phoneFull: user.phone || null,
     credits: user.credits || 0,
     role: user.role,
+    whitelisted: !!user.whitelisted,
     wechatBound: !!user.wechat?.unionid,
     createdAt: user.createdAt,
   };

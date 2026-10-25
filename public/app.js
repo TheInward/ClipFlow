@@ -89,6 +89,8 @@ function diskState() {
   const minFree = state.config?.disk?.minFree ?? 5 * 1024 ** 3;
   return { free, minFree, low: free !== null && free < minFree };
 }
+const operationNeedsCloud = (operation) => operation !== 'region-blur';
+const operationReady = (operation) => !operationNeedsCloud(operation) || state.config?.eraseReady !== false;
 function renderDiskWarn() {
   const d = diskState();
   if (!el.diskWarn) return;
@@ -258,7 +260,7 @@ async function init() {
     setNotice('服务器缺少 ffprobe，无法核实视频时长，任务无法开始。请联系管理员安装（详见部署文档）。');
   }
   if (state.config.eraseReady === false) {
-    setNotice(`去字幕服务尚未就绪（缺少${(state.config.eraseMissing || []).join('、')}），暂时无法开始任务，请联系管理员。`);
+    setNotice(`云端处理服务尚未就绪（缺少${(state.config.eraseMissing || []).join('、')}）；「区域遮挡 / 消物」仍可使用，其它云端工具请联系管理员开通。`);
   }
   startTicker();
   render();
@@ -349,9 +351,8 @@ async function acceptFiles(fileList) {
       const credits = me?.credits ?? 0;
         if (need > 0 && credits < need) {
         el.diskWarn.hidden = false;
-        el.diskWarn.textContent = `积分不足：这批视频预计需要 ${need} 积分，当前 ${credits} 积分。请先点页头「积分 · 充值」输入卡密后再上传。`;
-        toast(`积分不足：预计需要 ${need} 积分，当前 ${credits}`);
-        return;
+        el.diskWarn.textContent = `积分预估不足：这些文件最多约需 ${need} 积分，当前 ${credits} 积分。重复内容和已完成结果可能复用，最终以开始任务时服务端核算为准。`;
+        toast(`积分预估不足：最终费用将在开始任务时核算`);
       }
     }
   }
@@ -381,7 +382,7 @@ async function acceptFiles(fileList) {
       phase: 'queued', uploadPct: 0, hashPct: 0, stageText: '等待上传', fileId: null, error: null,
     });
   });
-  if (state.config?.eraseReady !== false) setNotice('');
+  if (operationReady(tabPayload().operation)) setNotice('');
   render();
   processQueue();
 }
@@ -573,6 +574,8 @@ function localRow(it, i) {
     taskId: null,
     shared: false,
     result: null,
+    operation: tabPayload().operation,
+    operationLabel: state.config?.operations?.find((op) => op.id === tabPayload().operation)?.label || '视频处理',
     downloadUrl: null,
     previewUrl: null,
     sourceExpiresAt: null,
@@ -659,7 +662,7 @@ function patchRows(rows) {
   if (r && panel) {
     const t = panel.querySelector('.preview-item:last-child .t');
     if (t && (r.status === 'running' || r.status === 'queued')) {
-      t.textContent = r.status === 'queued' ? '已提交，云端排队中' : `正在去字幕 ${r.progress}%`;
+      t.textContent = r.status === 'queued' ? '已提交，等待调度' : `${r.operationLabel || '正在处理'} ${r.progress}%`;
     }
     const tbar = panel.querySelector('.preview-item:last-child .tbar > span');
     if (tbar && r.status === 'running') tbar.style.width = `${r.progress}%`;
@@ -778,9 +781,10 @@ function rowAction(r) {
   }
   if (r.status === 'done' || r.status === 'succeeded') {
     const busy = state.downloading.has(r.taskId);
-    return { text: busy ? '下载中…' : '下载视频', cls: 'btn-ghost', enabled: !busy, fn: () => downloadRow(r) };
+    const label = r.result?.srt ? '下载字幕' : '下载视频';
+    return { text: busy ? '下载中…' : label, cls: 'btn-ghost', enabled: !busy, fn: () => downloadRow(r) };
   }
-  const ready = state.config?.eraseReady !== false && !diskState().low;
+  const ready = operationReady(r.operation || state.batch?.operation || tabPayload().operation) && !diskState().low;
   return { text: '开始任务', cls: 'btn-ghost', enabled: ready && Boolean(r.taskId), fn: () => startTask(r) };
 }
 
@@ -801,10 +805,14 @@ function panelNode(r) {
       ? (UNPLAYABLE_EXT.has(extOf(r.fileName))
           ? previewFallback('src', r)
           : `<video class="panel-video" controls preload="metadata" playsinline src="/f/${r.fileId}"></video>`)
-      : '<div class="state"><div class="t">等待上传</div></div>';
+      : r.sourceUrl
+        ? `<video class="panel-video" controls preload="metadata" playsinline src="${escapeHtml(r.sourceUrl)}"></video>`
+        : '<div class="state"><div class="t">等待上传</div></div>';
 
   const tgtBody = done
-    ? `<video class="panel-video" controls preload="metadata" playsinline src="${targetSrc}"></video>`
+    ? (r.result?.srt
+        ? `<div class="state"><div class="t">字幕文件已生成</div><div class="h">SRT 文本不能作为视频预览，可直接下载后导入剪辑软件。</div><a class="btn btn-ghost btn-sm" href="${r.downloadUrl}">下载 SRT</a></div>`
+        : `<video class="panel-video" controls preload="metadata" playsinline src="${targetSrc}"></video>`)
     : r.status === 'failed'
       ? `<div class="state"><div class="glyph bad"></div><div class="t">处理失败</div><div class="h">${escapeHtml(r.error || '接口返回失败')}</div></div>`
       : (r.status === 'queued' || r.status === 'running')
@@ -815,7 +823,7 @@ function panelNode(r) {
              if (r.etaSeconds) lines.push(`预计还需约 ${fmtClock(r.etaSeconds)}`);
              return `<div class="state">
                <div class="glyph spin"></div>
-               <div class="t">${r.status === 'queued' ? '已提交，云端排队中' : `正在去字幕 ${r.progress}%`}</div>
+               <div class="t">${r.status === 'queued' ? '已提交，等待调度' : `${escapeHtml(r.operationLabel || '正在处理')} ${r.progress}%`}</div>
                <div class="tbar"><span style="width:${r.status === 'queued' ? 0 : r.progress}%"></span></div>
                <div class="h">${escapeHtml(r.stage || '云端正在逐帧擦除字幕')}</div>
                ${lines.length ? `<div class="h">${lines.join(' · ')}</div>` : ''}
@@ -938,7 +946,7 @@ function renderBatchButtons(rows) {
   const picked = selectedRows(rows);
   const startable = picked.filter((r) => CAN_BATCH_START.includes(r.status) && r.taskId);
   const cancellable = picked.filter((r) => CAN_BATCH_CANCEL.includes(r.status) && r.taskId);
-  const ready = state.config?.eraseReady !== false;
+  const ready = operationReady(state.batch?.operation || tabPayload().operation);
 
   const deletable = picked.filter((r) => !['queued', 'running'].includes(r.status) && (r.fileId || r.taskId));
   const blocked = picked.filter((r) => ['queued', 'running'].includes(r.status)).length;
@@ -1148,9 +1156,7 @@ function saveBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 async function downloadRow(r) {
-  const name = r.result?.name && /-无字幕\./.test(r.result.name)
-    ? r.result.name
-    : `${String(r.fileName).replace(/\.[^.]+$/, '')}-无字幕.mp4`;
+  const name = r.result?.name || `${String(r.fileName).replace(/\.[^.]+$/, '')}-处理结果.${r.result?.srt ? 'srt' : 'mp4'}`;
   if (!r.taskId) return toast('这一行还没有可下载的产物');
 
   // 同源地址：服务端带头流式返回（浏览器下载管理器接管：立即开始、有原生进度、不占内存）
@@ -1160,7 +1166,7 @@ async function downloadRow(r) {
   if (state.downloading.has(r.taskId)) return toast('这一行已经在下载了');
   state.downloading.add(r.taskId);
   setTimeout(() => { state.downloading.delete(r.taskId); render(); }, 90000);
-  const setBusy = (busy) => { if (btn) { btn.disabled = busy; btn.textContent = busy ? '下载中…' : '下载视频'; } };
+  const setBusy = (busy) => { if (btn) { btn.disabled = busy; btn.textContent = busy ? '下载中…' : (r.result?.srt ? '下载字幕' : '下载视频'); } };
 
   // 产物不在服务器（KEEP_ARTIFACT=false）：/api/download 会 302 到云端，
   // 这里用 fetch 跟随后流式写入内存再保存 —— 数据由浏览器直连云端，不占服务器带宽。
@@ -1183,7 +1189,7 @@ async function downloadRow(r) {
     } else {
       chunks.push(new Uint8Array(await res.arrayBuffer()));
     }
-    const blob = new Blob(chunks, { type: 'video/mp4' });
+    const blob = new Blob(chunks, { type: r.result?.srt ? 'application/x-subrip;charset=utf-8' : 'video/mp4' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1195,7 +1201,7 @@ async function downloadRow(r) {
     setTimeout(() => URL.revokeObjectURL(url), 60000);
     toast(`已保存 ${name}（${fmtBytes(blob.size)}）`);
   } catch (err) {
-    toast(`下载失败：${err.message}；可在预览里右键「存储视频为…」直接保存`);
+    toast(`下载失败：${err.message}${r.result?.srt ? '' : '；可在预览里右键「存储视频为…」直接保存'}`);
   } finally {
     setBusy(false);
   }
@@ -1239,21 +1245,35 @@ function rowDownloadButton(r) {
   const nodes = [...el.list.querySelectorAll('.row')];
   const node = nodes[r.index - 1];
   if (!node) return null;
-  return [...node.querySelectorAll('.row-actions .btn')].find((b) => /下载视频|下载中/.test(b.textContent)) || null;
+  return [...node.querySelectorAll('.row-actions .btn')].find((b) => /下载视频|下载字幕|下载中/.test(b.textContent)) || null;
 }
 
 /* ---------------------------------------------------------------- 刷新恢复 */
 function clearSaved() { try { localStorage.removeItem(STORE_KEY); } catch { /* 忽略 */ } }
+function tabForBatch(data) {
+  const operation = data?.batch?.operation;
+  if (operation === 'enhance' || operation === 'asr-subtitles' || operation === 'transcode') {
+    return ({ enhance: 'enhance', 'asr-subtitles': 'asr', transcode: 'transcode' })[operation];
+  }
+  if (['ocr-extract', 'face-blur', 'portrait-matte', 'region-blur'].includes(operation)) return 'more';
+  if (operation === 'erase-subtitle' && (data.items || []).length && (data.items || []).every((item) => !item.fileId)) return 'link';
+  return 'erase';
+}
 async function restore() {
   let batchId = null;
   try { batchId = localStorage.getItem(STORE_KEY); } catch { /* 忽略 */ }
   if (!batchId) return;
   try {
     const data = await jsonApi(`/api/batches/${batchId}`);
-    state.batchId = batchId;
-    applyBatch(data);
-    render();
-    if ((data.items || []).some((r) => r.status === 'queued' || r.status === 'running')) startPolling();
+    const tab = tabForBatch(data);
+    state.tabBatch[tab] = batchId;
+    if (tab !== state.tab) await setTab(tab);
+    else {
+      state.batchId = batchId;
+      applyBatch(data);
+      render();
+      if ((data.items || []).some((r) => r.status === 'queued' || r.status === 'running')) startPolling();
+    }
     toast('已恢复上次的任务批次');
   } catch {
     clearSaved();
@@ -1476,7 +1496,7 @@ if (el.adminBtn) {
         const hits = u.rateHits ? ` <span class="abuse-tag warn">限流${u.rateHits}</span>` : '';
         const meta = [u.createdAt ? `注册 ${String(u.createdAt).slice(5, 10)}` : '', u.lastLoginAt ? `上次登录 ${String(u.lastLoginAt).slice(5, 16).replace('T', ' ')}` : '从未登录', u.charged ? `累计消费 ${u.charged}` : ''].filter(Boolean).join(' · ');
         return `<div class="abuse-item"><b>${u.phone || u.id}</b> 积分 ${u.credits} ${state}${wl}${hits}<span class="h">${meta}</span>
-          <button class="btn-text" data-act="whitelist" data-id="${u.id}">${u.whitelisted ? '取消白名单' : '加白名单'}</button>
+          <button class="btn-text" data-act="${u.whitelisted ? 'unwhitelist' : 'whitelist'}" data-id="${u.id}">${u.whitelisted ? '取消白名单' : '加白名单'}</button>
           <button class="btn-text" data-act="resume" data-id="${u.id}">解除</button>
           <button class="btn-text" data-act="suspend" data-id="${u.id}">暂停</button></div>`;
       }).join('');
@@ -1597,6 +1617,10 @@ async function setTab(tab) {
     try { applyBatch(await jsonApi(`/api/batches/${state.batchId}`)); startPolling(); }
     catch { state.batchId = null; clearSaved(); }
   }
+  try {
+    if (state.batchId) localStorage.setItem(STORE_KEY, state.batchId);
+    else localStorage.removeItem(STORE_KEY);
+  } catch { /* 忽略 */ }
   render();
 }
 
@@ -1618,6 +1642,7 @@ async function addLinkBatch() {
     el.linkInputs.value = '';
     state.tabBatch.link = res.batch.id;
     state.batchId = res.batch.id;
+    try { localStorage.setItem(STORE_KEY, state.batchId); } catch { /* 忽略 */ }
     applyBatch(res);
     // 新添加的链接默认全部勾选，方便直接点「批量开始」
     const fresh = viewRows().filter((r) => r.status === 'idle');
@@ -1961,11 +1986,12 @@ let taskListData = [];
 let taskPollTimer = null;
 
 const TASK_FILTERS = [
-  ['all', '全部'], ['active', '进行中'], ['done', '已完成'], ['failed', '失败'],
+  ['all', '全部'], ['idle', '待开始'], ['active', '进行中'], ['done', '已完成'], ['failed', '失败'],
 ];
 function taskBucket(t) {
   if (t.status === 'succeeded') return 'done';
   if (['failed', 'canceled', 'expired'].includes(t.status)) return 'failed';
+  if (t.status === 'pending' && !t.started) return 'idle';
   return 'active';
 }
 function taskStatusText(t) {
@@ -1974,7 +2000,7 @@ function taskStatusText(t) {
   if (t.status === 'canceled') return '已取消';
   if (t.status === 'expired') return '已过期';
   if (t.status === 'processing') return `处理中 ${t.progress || 0}%`;
-  return '排队中';
+  return t.started ? '排队中' : '待开始';
 }
 
 async function loadTasks() {
@@ -2031,7 +2057,7 @@ function renderTasks() {
         <div class="task-meta">${escapeHtml(meta)}${t.error ? ` · ${escapeHtml(t.error.slice(0, 60))}` : ''}</div>
         ${taskBucket(t) === 'active' ? `<div class="task-prog"><i style="width:${t.progress || 0}%"></i></div>` : ''}
       </div>
-      <span class="pill ${t.status === 'succeeded' ? 'ok' : t.status === 'failed' ? 'bad' : 'run'}">${taskStatusText(t)}</span>
+      <span class="pill ${t.status === 'succeeded' ? 'ok' : ['failed', 'expired'].includes(t.status) ? 'bad' : taskBucket(t) === 'active' ? 'run' : ''}">${taskStatusText(t)}</span>
       <div class="task-act"></div>`;
     const acts = row.querySelector('.task-act');
     if (t.downloadUrl) {
@@ -2039,9 +2065,9 @@ function renderTasks() {
       a.className = 'btn btn-ghost'; a.href = t.downloadUrl; a.textContent = '下载'; a.download = '';
       acts.appendChild(a);
     }
-    if (taskBucket(t) === 'failed') {
+    if (t.status === 'failed' || t.status === 'canceled' || taskBucket(t) === 'idle') {
       const retry = document.createElement('button');
-      retry.className = 'btn btn-primary'; retry.type = 'button'; retry.textContent = '重试';
+      retry.className = 'btn btn-primary'; retry.type = 'button'; retry.textContent = taskBucket(t) === 'idle' ? '开始' : '重试';
       retry.addEventListener('click', async () => {
         retry.disabled = true;
         try { await jsonApi(`/api/tasks/${t.id}/start`, { method: 'POST', body: '{}' }); toast('已重新排队'); loadTasks(); }

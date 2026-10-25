@@ -8,7 +8,7 @@ import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import vm from 'node:vm';
-import { enhanceVideo } from '../pipeline.mjs';
+import { enhanceVideo, runTranscode, runToolVideo, runAsr, runOcr } from '../pipeline.mjs';
 import { probeVideoDuration } from '../media.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -83,8 +83,8 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     return { status:response.status, data, headers:response.headers };
   }
   const credits = async(user='a') => (await api('/api/me',{user})).data.user.credits;
-  const upload = async(value) => {
-    const r=await api('/api/uploads',{method:'POST',raw:String(value),headers:{'X-File-Name':'test.mp4'}});
+  const upload = async(value, user='a') => {
+    const r=await api('/api/uploads',{user,method:'POST',raw:String(value),headers:{'X-File-Name':'test.mp4'}});
     assert.equal(r.status,200,JSON.stringify(r.data)); return r.data.file.id;
   };
   const batch = async(file, opts={}) => {
@@ -105,12 +105,14 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
   });
   const file=await upload(3.2);
   await t.test('legacy process route requires credits and rejects invalid media',async()=>{
-    const r=await api(`/api/files/${file}/process`,{user:'poor',method:'POST',body:{durationSec:1}});
+    const poorFile=await upload(3.2,'poor');
+    const r=await api(`/api/files/${poorFile}/process`,{user:'poor',method:'POST',body:{durationSec:1}});
     assert.equal(r.status,402);assert.equal(upstreamTasks.size,0);
     const invalid=await upload('not a video');
     assert.equal((await api('/api/batches',{method:'POST',body:{fileIds:[invalid],durations:{[invalid]:1}}})).status,422);
   });
-  const a=await batch(file), b=await batch(file,{user:'b'});
+  const bFile=await upload(3.2,'b');
+  const a=await batch(file), b=await batch(bFile,{user:'b'});
   const aId=a.items[0].taskId, bId=b.items[0].taskId;
   await t.test('same bytes are not shared between users or different processing settings',async()=>{
     assert.notEqual(aId,bId);
@@ -122,6 +124,15 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     const encoded = '%74' + aId.slice(1);
     assert.equal((await api(`/api/tasks/${encoded}`,{user:'b'})).status,404);
     assert.equal((await api(`/api/tasks/${encoded}`,{user:'b',method:'DELETE'})).status,404);
+  });
+  await t.test('batch preserves tool options and enhancement version', async () => {
+    const face = await batch(file, { operation: 'face-blur', options: { maskMode: 'blur', strength: 'high' } });
+    const faceTask = await task(face.items[0].taskId);
+    assert.deepEqual(faceTask.options, { maskMode: 'blur', strength: 'high' });
+    const enhance = await batch(file, { operation: 'enhance', resolution: '2k', toolVersion: 'professional' });
+    const enhanceTask = await task(enhance.items[0].taskId);
+    assert.equal(enhanceTask.resolution, '2k');
+    assert.equal(enhanceTask.toolVersion, 'professional');
   });
   await t.test('server duration determines price; admin-triggered refunds go to the actual payer',async()=>{
     assert.equal((await start(aId,'admin')).status,202);
@@ -166,7 +177,9 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
   });
   await t.test('batch start charges each unique task once and reports insufficient balance', async () => {
     const f = await upload(2.6);
-    const poor = await batch(f, { user: 'poor' });
+    // 建批次现在要求文件属于当前账号：poor 用自己的文件测试余额不足
+    const poorFile = await upload(2.6, 'poor');
+    const poor = await batch(poorFile, { user: 'poor' });
     const rejected = await api(`/api/batches/${poor.batch.id}/start`, { user: 'poor', method: 'POST', body: {} });
     assert.equal(rejected.data.started, 0); assert.equal(rejected.data.insufficient.length, 1);
     const r = await api('/api/batches', { method: 'POST', body: { fileIds: [f, f], durations: { [f]: 0.01 } } });
@@ -203,6 +216,37 @@ test('enhancement response envelopes resolve to string URLs and numeric duration
       assert.equal(r.url,'https://example.invalid/output.mp4');assert.equal(r.duration,12);
     }
   } finally { globalThis.fetch=original;if(key===undefined)delete process.env.AMK_API_KEY;else process.env.AMK_API_KEY=key; }
+});
+
+test('new cloud tools unwrap nested result payloads', async () => {
+  const original = globalThis.fetch, key = process.env.AMK_API_KEY, base = process.env.AMK_API_BASE;
+  process.env.AMK_API_KEY = 'unit-test'; process.env.AMK_API_BASE = 'https://example.invalid/api';
+  try {
+    const videoResult = { video_url: 'https://example.invalid/output.mp4', duration: 12, resolution: '1080p' };
+    for (const envelope of [false, true]) {
+      const wrap = (payload) => envelope ? { data: payload } : payload;
+      globalThis.fetch = async (_url, opts = {}) => {
+        if (opts.method === 'POST') return Response.json(wrap({ task_id: 'remote-1' }));
+        if (opts.method === 'HEAD') return new Response(null, { headers: { 'content-length': '2048' } });
+        return Response.json(wrap({ status: 'completed', result: videoResult }));
+      };
+      const tr = await runTranscode('https://example.invalid/source.mp4', { pollMs: 1, timeoutMs: 100 });
+      assert.equal(tr.url, videoResult.video_url); assert.equal(tr.duration, 12);
+      const tool = await runToolVideo('face-blur-video', 'https://example.invalid/source.mp4', {}, { pollMs: 1, timeoutMs: 100 });
+      assert.equal(tool.url, videoResult.video_url); assert.equal(tool.duration, 12);
+
+      const subtitleResult = { subtitles: [{ start_time: 0, end_time: 1, subtitle_text: 'hello' }] };
+      globalThis.fetch = async (_url, opts = {}) => opts.method === 'POST'
+        ? Response.json(wrap({ task_id: 'remote-2' }))
+        : Response.json(wrap({ status: 'completed', result: subtitleResult }));
+      assert.equal((await runAsr('https://example.invalid/source.mp4', { pollMs: 1, timeoutMs: 100 })).subtitles[0].text, 'hello');
+      assert.equal((await runOcr('https://example.invalid/source.mp4', { pollMs: 1, timeoutMs: 100 })).subtitles[0].text, 'hello');
+    }
+  } finally {
+    globalThis.fetch = original;
+    if (key === undefined) delete process.env.AMK_API_KEY; else process.env.AMK_API_KEY = key;
+    if (base === undefined) delete process.env.AMK_API_BASE; else process.env.AMK_API_BASE = base;
+  }
 });
 
 test('upload abort settles its promise and prevents a canceled upload from being sent',async()=>{

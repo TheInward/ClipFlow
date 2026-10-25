@@ -125,6 +125,8 @@ a { color: inherit; text-decoration: none; }
   background: rgba(244, 245, 247, 0.86); backdrop-filter: blur(14px);
 }
 .header-inner { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 20px 0; }
+.header-right { display: flex; align-items: center; gap: 10px; }
+.session-left { color: var(--ink-3); font: 12px/1 var(--mono); white-space: nowrap; }
 .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .mark {
   width: 30px; height: 30px; border-radius: 10px; flex: none;

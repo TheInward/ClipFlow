@@ -4,7 +4,7 @@
  * 全自动视频去字幕站点：上传 → 云端/本地去字幕 → 预览与下载
  *
  * 职责：
- *   1. Token 登录（会话 Cookie，当天 23:59:59 失效，第二天需重新登录）
+ *   1. 手机号/密码登录（HttpOnly 会话 Cookie，持续操作续期，闲置 1 小时失效）
  *   2. 接收视频上传（流式落盘、大小限制、MD5/SHA-256 校验、MD5 秒传去重）
  *   3. 为每个文件生成唯一 ID（/f/<id>）与 MD5 寻址（/f/<md5>）
  *   4. 去字幕接口 POST /api/files/:id/process -> 返回 taskId；GET /api/tasks/:taskId 轮询
@@ -17,12 +17,14 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import net from 'node:net';
+import dns from 'node:dns/promises';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { enhanceVideo, runAsr, toSrt, runTranscode, runOcr, runToolVideo } from './pipeline.mjs';
 import { ZipStream, streamRemote } from './zip.mjs';
 import { probeVideoDuration, probeAvailable, probeVideoSize } from './media.mjs';
-import { normalizePhone, findUserByPhone, createUser, checkPassword, publicUser, createUserSession, chargeSeconds, refundSeconds, createCodes, redeemCode, ensureAdmin, setPassword, touchSession } from './accounts.mjs';
+import { normalizePhone, findUserByPhone, createUser, checkPassword, publicUser, createUserSession, chargeSeconds, refundSeconds, createCodes, redeemCode, ensureAdmin, setPassword, touchSession, SESSION_TTL_MS } from './accounts.mjs';
 import { take as takeToken, stats as rateStats } from './ratelimit.mjs';
 import { fileURLToPath } from 'node:url';
 import {
@@ -255,8 +257,6 @@ const KEEP_ARTIFACT = process.env.KEEP_ARTIFACT === 'true';
 /** 过期时长（小时）的中文表述，用于提示文案 */
 const ttlHours = () => { const h = UPLOAD_TTL_MS / 3600000; return Number.isInteger(h) ? String(h) : h.toFixed(1); };
 const SWEEP_INTERVAL_MS = Math.max(500, Number(process.env.SWEEP_INTERVAL_MS || 5 * 60 * 1000));
-/** 会话每天 23:59:59 失效（可用 SESSION_END_MINUTE 调整到别的整点分钟） */
-const SESSION_END_MINUTE = Math.min(23 * 60 + 59, Math.max(0, Number(process.env.SESSION_END_MINUTE ?? 23 * 60 + 59)));
 const SESSION_COOKIE = 'clp_sid';
 const LOGIN_MAX_FAILS = Math.max(3, Number(process.env.LOGIN_MAX_FAILS || 10));
 const LOGIN_WINDOW_MS = Math.max(1000, Number(process.env.LOGIN_WINDOW_MS || 10 * 60 * 1000));
@@ -278,6 +278,7 @@ const FACE_STRENGTHS = ['low', 'medium', 'high'];
 const MATTE_BACKGROUNDS = ['green', 'black', 'white'];
 // 区域遮挡/消物：固定区域的三种处理方式
 const REGION_MODES = ['delogo', 'box', 'blur'];
+const operationNeedsCloud = (operation) => operation !== 'region-blur';
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -318,9 +319,12 @@ db.creditLedger ||= [];
 db.redemptionCodes ||= {};
 db.abuseEvents ||= [];
 // MD5 → fileId 索引（去重的唯一依据，文件名即 MD5）；旧记录没有 md5 字段，顺手补建索引
-db.md5Index ||= {};
+// MD5 索引必须按账号隔离。物理 blob 仍可复用，但每个用户拥有独立的文件记录、
+// 文件名、过期时间和删除权限，避免跨账号秒传泄漏元数据或互相删除源文件。
+const fileIndexKey = (userId, md5) => `${userId || 'legacy'}:${md5}`;
+db.md5Index = {};
 for (const f of Object.values(db.files)) {
-  if (f.md5) db.md5Index[f.md5] = f.id;
+  if (f.md5) db.md5Index[fileIndexKey(f.userId, f.md5)] = f.id;
 }
 
 let saveTimer = null;
@@ -433,38 +437,7 @@ function sanitizeName(raw) {
   return (base || 'video.mp4').slice(0, 160);
 }
 
-/* ================================================================ 登录鉴权
- * 内部使用，不做复杂账号体系：一个访问 Token + 会话 Cookie。
- * 会话在「当天 23:59:59」失效，第二天必须重新输入 Token。
- * ================================================================= */
-const TOKEN_FILE = path.join(DATA_DIR, 'access-token.txt');
-
-function resolveAccessToken() {
-  if (process.env.ACCESS_TOKEN) return { token: process.env.ACCESS_TOKEN, source: '环境变量 ACCESS_TOKEN' };
-  try {
-    const t = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
-    if (t) return { token: t, source: `文件 ${path.relative(__dirname, TOKEN_FILE)}` };
-  } catch {
-    /* 首次运行 */
-  }
-  const token = crypto.randomBytes(18).toString('base64url');
-  try {
-    fs.writeFileSync(TOKEN_FILE, `${token}\n`, { mode: 0o600 });
-  } catch (err) {
-    console.warn('[auth] Token 落盘失败（仍可使用本次生成的 Token）:', err.message);
-  }
-  return { token, source: '自动生成并写入 data/access-token.txt' };
-}
-
-const ACCESS_TOKEN = resolveAccessToken();
-const TOKEN_DIGEST = crypto.createHash('sha256').update(ACCESS_TOKEN.token).digest();
-
-/** 当天 23:59:59.999 的时间戳（会话统一在这一刻失效） */
-function endOfSessionDay(from = Date.now()) {
-  const d = new Date(from);
-  d.setHours(Math.floor(SESSION_END_MINUTE / 60), SESSION_END_MINUTE % 60, 59, 999);
-  return d.getTime();
-}
+/* ================================================================ 登录鉴权 */
 
 function parseCookies(header) {
   const out = Object.create(null);
@@ -554,19 +527,6 @@ function currentUser(req) {
   return s?.userId ? db.users[s.userId] || null : null;
 }
 
-function createSession(req) {
-  const sid = crypto.randomBytes(18).toString('base64url');
-  const expiresAt = endOfSessionDay();
-  db.sessions[sid] = {
-    createdAt: new Date().toISOString(),
-    expiresAt,
-    ip: clientIp(req),
-    ua: String(req.headers['user-agent'] || '').slice(0, 160),
-  };
-  saveDb();
-  return { sid, expiresAt };
-}
-
 /** 登录失败限流：同一 IP 在窗口内失败过多直接 429，避免 Token 被暴力枚举 */
 const loginFails = new Map();
 function noteLoginFail(ip) {
@@ -590,11 +550,6 @@ function loginBlocked(ip) {
   return rec.count >= LOGIN_MAX_FAILS ? Math.ceil((LOGIN_WINDOW_MS - (Date.now() - rec.first)) / 1000) : 0;
 }
 
-function tokenMatches(input) {
-  const got = crypto.createHash('sha256').update(String(input ?? '')).digest();
-  return got.length === TOKEN_DIGEST.length && crypto.timingSafeEqual(got, TOKEN_DIGEST);
-}
-
 /* ================================================================ 过期清理
  * 上传的源文件到期后过期：删除磁盘文件、移除 MD5 索引，
  * 连带清理该文件派生的任务产物（避免留下无主数据）。
@@ -612,9 +567,12 @@ async function sweepExpired(trigger = 'timer') {
   try {
     for (const f of Object.values(db.files)) {
       if (!isFileExpired(f)) continue;
-      await fsp.rm(path.join(DATA_DIR, f.storedPath), { force: true }); // 1) 删文件
       delete db.files[f.id];
-      if (db.md5Index[f.md5] === f.id) delete db.md5Index[f.md5]; // 2) 去掉 MD5 信息
+      const indexKey = fileIndexKey(f.userId, f.md5);
+      if (db.md5Index[indexKey] === f.id) delete db.md5Index[indexKey];
+      // 多个账号可能各自持有同一物理 blob；最后一个引用到期后才删磁盘文件。
+      const blobStillUsed = Object.values(db.files).some((other) => other.storedPath === f.storedPath);
+      if (!blobStillUsed) await fsp.rm(path.join(DATA_DIR, f.storedPath), { force: true });
       for (const t of Object.values(db.tasks)) {
         if (t.fileId !== f.id) continue;
         if (t.status === 'pending' || t.status === 'processing') cancelTask(t);
@@ -710,8 +668,15 @@ async function sweepExpired(trigger = 'timer') {
 }
 
 const serializeFile = (f) => ({
-  ...f,
+  id: f.id,
+  md5: f.md5,
+  name: f.name,
   names: f.names || [f.name],
+  ext: f.ext,
+  size: f.size,
+  mime: f.mime,
+  hits: f.hits || 1,
+  createdAt: f.createdAt,
   storageName: `${f.md5}${f.ext}`,
   url: publicFileUrl(f.id),
   localUrl: `/f/${f.id}`,
@@ -735,8 +700,8 @@ const serializeTask = (t) => ({
    * 前端优先用它：浏览器直连 CDN，速度取决于客户端带宽，且不占用本服务器出带宽。
    * 过期或不可用时前端自动回退到本站地址。
    */
-  posterUrl: t.status === 'succeeded' ? `/api/artifacts/${t.id}/poster.svg` : null,
-  publicPosterUrl: t.status === 'succeeded' ? publicPosterUrl(t.id) : null,
+  posterUrl: t.status === 'succeeded' && t.result?.poster ? `/api/artifacts/${t.id}/poster.svg` : null,
+  publicPosterUrl: t.status === 'succeeded' && t.result?.poster ? publicPosterUrl(t.id) : null,
   sizeText: t.result ? formatBytes(t.result.size) : null,
 });
 
@@ -821,11 +786,13 @@ async function handlePrecheck(req, res) {
   const body = await readJsonBody(req);
   const md5 = String(body.md5 || '').toLowerCase();
   if (!MD5_RE.test(md5)) return sendError(res, 400, 'md5 必须是 32 位十六进制字符串');
-  const hit = db.files[db.md5Index[md5]];
+  const me = currentUser(req);
+  const indexKey = fileIndexKey(me?.id, md5);
+  const hit = db.files[db.md5Index[indexKey]];
   if (!hit || isFileExpired(hit) || !(await blobExists(hit))) {
     if (hit && isFileExpired(hit)) {
       // 过期文件的索引可能还没被扫描到：立刻清掉，避免秒传误命中已删除的内容
-      delete db.md5Index[md5];
+      delete db.md5Index[indexKey];
       saveDb();
       await sweepExpired('lazy');
       console.log(`[precheck] ${md5} 已过期，按未命中处理`);
@@ -833,7 +800,7 @@ async function handlePrecheck(req, res) {
     if (!hit) return sendJson(res, 200, { exists: false, md5 });
     if (isFileExpired(hit)) return sendJson(res, 200, { exists: false, md5, expired: true });
 
-    delete db.md5Index[md5]; // 索引失效，让客户端正常上传
+    delete db.md5Index[indexKey]; // 索引失效，让客户端正常上传
     saveDb();
     return sendJson(res, 200, { exists: false, md5, stale: true });
   }
@@ -842,6 +809,8 @@ async function handlePrecheck(req, res) {
   hit.names = [...new Set([...(hit.names || [hit.name]), ...(name ? [name] : [])])].slice(0, 20);
   hit.hits = (hit.hits || 1) + 1;
   hit.lastSeenAt = new Date().toISOString();
+  // 本次上传是一次新的使用行为；给该账号自己的文件记录重新计算有效期。
+  hit.expiresAt = new Date(Date.now() + UPLOAD_TTL_MS).toISOString();
   saveDb();
   console.log(
     `[precheck] 命中 ${md5} -> ${hit.id}，跳过上传 ${formatBytes(hit.size)}` +
@@ -911,8 +880,10 @@ async function handleUpload(req, res) {
     });
   }
 
-  // ---- 去重：同 MD5 已在服务器上，直接丢弃刚写入的临时文件 ----
-  const existing = db.files[db.md5Index[digest]];
+  const me = currentUser(req);
+  const indexKey = fileIndexKey(me?.id, digest);
+  // ---- 账号内去重：同 MD5 已存在，直接丢弃刚写入的临时文件 ----
+  const existing = db.files[db.md5Index[indexKey]];
   if (await blobExists(existing)) {
     await fsp.rm(tmpPath, { force: true });
     existing.names = [...new Set([...(existing.names || [existing.name]), rawName])].slice(0, 20);
@@ -928,6 +899,40 @@ async function handleUpload(req, res) {
       savedBytes: received,
       md5: digest,
     });
+  }
+
+  // 物理层仍允许复用其它账号已上传的相同 blob，但为当前账号创建独立记录。
+  // 这样不会暴露对方文件名/用户 ID，也不会共享过期时间和删除权限。
+  let sharedBlob = null;
+  for (const candidate of Object.values(db.files)) {
+    if (candidate.md5 === digest && !isFileExpired(candidate) && await blobExists(candidate)) {
+      sharedBlob = candidate;
+      break;
+    }
+  }
+  if (sharedBlob) {
+    await fsp.rm(tmpPath, { force: true });
+    const fileId = id('vf');
+    const file = {
+      id: fileId,
+      md5: digest,
+      name: rawName,
+      names: [rawName],
+      ext: sharedBlob.ext,
+      size: sharedBlob.size,
+      mime: sharedBlob.mime,
+      storedPath: sharedBlob.storedPath,
+      sha256: sharedBlob.sha256,
+      userId: me?.id || null,
+      hits: 1,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + UPLOAD_TTL_MS).toISOString(),
+    };
+    db.files[fileId] = file;
+    db.md5Index[indexKey] = fileId;
+    saveDb();
+    console.log(`[dedupe] ${digest} 复用物理 blob，为账号创建独立文件记录 ${fileId}`);
+    return sendJson(res, 200, { file: serializeFile(file), deduped: true, savedBytes: received, md5: digest });
   }
 
   // ---- 落盘：文件名就是 MD5，扩展名沿用本次上传 ----
@@ -946,13 +951,13 @@ async function handleUpload(req, res) {
     mime: MIME[ext] || req.headers['content-type'] || 'video/mp4',
     storedPath: path.relative(DATA_DIR, storedPath),
     sha256: sha256.digest('hex'),
-    userId: currentUser(req)?.id || null,
+    userId: me?.id || null,
     hits: 1,
     createdAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + UPLOAD_TTL_MS).toISOString(), // 到期时间（UPLOAD_TTL_HOURS 可配）
   };
   db.files[fileId] = file;
-  db.md5Index[digest] = fileId;
+  db.md5Index[indexKey] = fileId;
   saveDb();
 
   console.log(
@@ -1079,6 +1084,7 @@ async function execute(task) {
     if (file && isFileExpired(file) && !resume) throw new Error(`源文件已过期（超过 ${ttlHours()} 小时）并被删除，请重新上传`);
     const srcPath = file ? path.join(DATA_DIR, file.storedPath) : null;
     const outDir = path.join(OUTPUT_DIR, task.id);
+    await fsp.mkdir(outDir, { recursive: true });
 
     // ---- 区域遮挡 / 消物（本地 ffmpeg，不依赖云端接口） ----
     if (task.operation === 'region-blur') {
@@ -1108,7 +1114,7 @@ async function execute(task) {
         if (task.canceled) return;
         task.progress = Math.max(Number(task.progress) || 0, 30 + Math.round(pct * 0.6));
         saveDb();
-      }, () => { if (task.canceled) throw Object.assign(new Error('任务已取消'), { code: 'CANCELED' }); });
+      }, () => { if (task.canceled) throw Object.assign(new Error('任务已取消'), { code: 'CANCELED' }); }, task.durationSec);
       const statR = await fsp.stat(path.join(outDir, 'output.mp4'));
       finishTaskResult(task, { name: `${baseNameR}-区域处理.mp4`, size: statR.size, hasVideo: true, remote: false });
       console.log(`[region] 任务 ${task.id} 完成，产物 ${formatBytes(statR.size)}`);
@@ -1262,7 +1268,7 @@ async function execute(task) {
       if (task.canceled) return;
       task.result = {
         name: `${path.basename(file?.name || task.fileName, file?.ext || path.extname(task.fileName))}-超清.mp4`,
-        size, hasVideo: true, poster: true, remote: !keptEnh,
+        size, hasVideo: true, poster: false, remote: !keptEnh,
       };
       task.remoteResultUrl = keptEnh ? null : enh.url;
       task.remoteExpiresAt = keptEnh ? null : urlExpiry(enh.url);
@@ -1425,10 +1431,14 @@ async function purgeContent({ fileId, taskId } = {}) {
 
   // ② 源文件 + MD5 索引 + 内容索引
   if (file && !fileRefs(file.id)) {
-    out.freedBytes += file.size || 0;
-    await fsp.rm(path.join(DATA_DIR, file.storedPath), { force: true }).catch(() => {});
     delete db.files[file.id];
-    if (file.md5 && db.md5Index[file.md5] === file.id) { delete db.md5Index[file.md5]; out.removedMd5 = true; }
+    const indexKey = fileIndexKey(file.userId, file.md5);
+    if (file.md5 && db.md5Index[indexKey] === file.id) { delete db.md5Index[indexKey]; out.removedMd5 = true; }
+    const blobStillUsed = Object.values(db.files).some((other) => other.storedPath === file.storedPath);
+    if (!blobStillUsed) {
+      out.freedBytes += file.size || 0;
+      await fsp.rm(path.join(DATA_DIR, file.storedPath), { force: true }).catch(() => {});
+    }
     for (const [key, rec] of Object.entries(db.results)) if (rec.fileId === file.id) delete db.results[key];
     out.removedFile = true;
   } else if (file) {
@@ -1475,8 +1485,8 @@ function assertTaskOwner(task, user) {
 }
 
 /** 统一的成功收尾：写结果、算耗时、登记复用索引 */
-function finishTaskResult(task, { name, size, hasVideo, remote, remoteUrl = null, srt = false }) {
-  task.result = { name, size, hasVideo, poster: hasVideo && !srt, remote, ...(srt ? { srt: true } : {}) };
+function finishTaskResult(task, { name, size, hasVideo, remote, remoteUrl = null, srt = false, poster = false }) {
+  task.result = { name, size, hasVideo, poster, remote, ...(srt ? { srt: true } : {}) };
   if (remote && remoteUrl) {
     task.remoteResultUrl = remoteUrl;
     task.remoteExpiresAt = urlExpiry(remoteUrl);
@@ -1506,7 +1516,7 @@ async function burnSubtitles(srcPath, srtPath, destPath) {
 }
 
 /** 本地 ffmpeg 按滤镜处理视频（带进度回调，可取消） */
-async function runFfmpegFilter(srcPath, destPath, filter, onProgress = () => {}, assertAlive = () => {}) {
+async function runFfmpegFilter(srcPath, destPath, filter, onProgress = () => {}, assertAlive = () => {}, durationSec = 0) {
   const { execFile } = await import('node:child_process');
   const ffmpeg = process.env.FFMPEG_PATH
     || (process.env.FFPROBE_PATH ? path.join(path.dirname(process.env.FFPROBE_PATH), 'ffmpeg') : 'ffmpeg');
@@ -1517,8 +1527,15 @@ async function runFfmpegFilter(srcPath, destPath, filter, onProgress = () => {},
       if (err) reject(new Error(`本地处理失败：${String(se || err.message).slice(-300)}`));
       else resolve();
     });
-    child.stdout?.on('data', () => {
-      try { assertAlive(); } catch (e) { try { child.kill('SIGKILL'); } catch { /* 忽略 */ } reject(e); }
+    let progressBuffer = '';
+    child.stdout?.on('data', (chunk) => {
+      try {
+        assertAlive();
+        progressBuffer = (progressBuffer + String(chunk)).slice(-4096);
+        const matches = [...progressBuffer.matchAll(/out_time_ms=(\d+)/g)];
+        const micros = Number(matches.at(-1)?.[1]);
+        if (durationSec > 0 && Number.isFinite(micros)) onProgress(Math.min(99, (micros / 1_000_000 / durationSec) * 100));
+      } catch (e) { try { child.kill('SIGKILL'); } catch { /* 忽略 */ } reject(e); }
     });
   });
 }
@@ -1719,11 +1736,13 @@ function createBatch({ fileIds, operation = DEFAULT_OPERATION, durations = {}, u
     erasePreset: resolveErasePreset(erasePreset),
     enhance: !!enhance,
     resolution: resolution || null,
+    toolVersion: toolVersion || null,
+    options: options || null,
     userId: userId || null,
     taskIds: [],
     items: [],
   };
-  appendFilesToBatch(batch, fileIds, durations, { erasePreset: batch.erasePreset, eraseRegion, eraseMode, modelVersion, resolution, toolVersion: batch.toolVersion, options: batch.options });
+  appendFilesToBatch(batch, fileIds, durations, { erasePreset: batch.erasePreset, eraseRegion, eraseMode, modelVersion, resolution: batch.resolution, toolVersion: batch.toolVersion, options: batch.options });
   db.batches[batch.id] = batch;
   saveDb();
   const reusedN = batch.items.filter((i) => i.reused).length;
@@ -1795,7 +1814,16 @@ function serializeBatch(batch) {
       elapsedSeconds: task?.elapsedSeconds ?? null,
       etaSeconds: task?.etaSeconds ?? null,
       // 产物（仅成功任务）
-      result: task?.result ? { name: task.result.name, size: task.result.size, sizeText: formatBytes(task.result.size) } : null,
+      result: task?.result ? {
+        name: task.result.name,
+        size: task.result.size,
+        sizeText: formatBytes(task.result.size),
+        hasVideo: task.result.hasVideo !== false,
+        srt: !!task.result.srt,
+      } : null,
+      operation: task?.operation || batch.operation,
+      operationLabel: task?.operationLabel || OPERATIONS[task?.operation || batch.operation]?.label || batch.operation,
+      sourceUrl: task?.sourceUrl || null,
       downloadUrl: task && task.status === 'succeeded' ? `/api/download/${task.id}` : null,
       previewUrl: task && task.status === 'succeeded' && task.result?.hasVideo ? `/api/artifacts/${task.id}/video` : null,
       productRemote: !!task?.result?.remote,
@@ -1884,6 +1912,44 @@ function parseVideoUrl(rawUrl) {
   return { url: raw, name, ext };
 }
 
+function isPrivateAddress(rawAddress) {
+  const address = String(rawAddress || '').split('%')[0].toLowerCase();
+  if (address.startsWith('::ffff:')) return isPrivateAddress(address.slice(7));
+  if (net.isIP(address) === 4) {
+    const [a, b] = address.split('.').map(Number);
+    return a === 0 || a === 10 || a === 127 || a >= 224
+      || (a === 100 && b >= 64 && b <= 127)
+      || (a === 169 && b === 254)
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168)
+      || (a === 198 && (b === 18 || b === 19));
+  }
+  if (net.isIP(address) === 6) {
+    return address === '::' || address === '::1'
+      || address.startsWith('fc') || address.startsWith('fd')
+      || /^fe[89ab]/.test(address);
+  }
+  return true;
+}
+
+/** 链接探测会由服务器发起，必须拒绝本机、局域网和云元数据网段，避免 SSRF。 */
+async function assertPublicRemoteUrl(rawUrl) {
+  const parsed = new URL(rawUrl);
+  if (parsed.username || parsed.password) {
+    throw Object.assign(new Error('视频链接不能包含用户名或密码'), { status: 400 });
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost') || isPrivateAddress(host)) {
+    if (net.isIP(host)) throw Object.assign(new Error('视频链接不能指向本机或内网地址'), { status: 400 });
+  }
+  let addresses;
+  try { addresses = await dns.lookup(host, { all: true, verbatim: true }); }
+  catch { throw Object.assign(new Error('无法解析视频链接的域名'), { status: 422 }); }
+  if (!addresses.length || addresses.some((entry) => isPrivateAddress(entry.address))) {
+    throw Object.assign(new Error('视频链接解析到了本机或内网地址，已拒绝访问'), { status: 400 });
+  }
+}
+
 /** 用链接建一个任务（源文件不上传，云端直接拉取该地址） */
 function createUrlTask(urlInfo, user, eff) {
   const task = createTaskForFile(
@@ -1918,9 +1984,8 @@ const ROUTES = {
         sweepIntervalMs: SWEEP_INTERVAL_MS,
       },
       session: {
-        endMinutes: SESSION_END_MINUTE,
-        endAt: new Date(endOfSessionDay()).toISOString(),
-        note: '会话每天 23:59 失效，次日需重新登录',
+        ttlMs: SESSION_TTL_MS,
+        note: '持续操作会自动续期；闲置 1 小时后需要重新登录',
       },
       // 版本号：页面底部展示，便于确认线上跑的是哪次部署
       build: BUILD_ID,
@@ -2080,6 +2145,9 @@ const ROUTES = {
     const users = Object.values(db.users).map((u) => ({
       id: u.id, phone: u.phone, credits: u.credits, role: u.role,
       whitelisted: !!u.whitelisted, suspended: u.suspended || null, rateHits: u.rateHits || 0,
+      createdAt: u.createdAt, lastLoginAt: u.lastLoginAt || null,
+      charged: (db.creditLedger || []).filter((e) => e.userId === u.id && e.delta < 0)
+        .reduce((sum, e) => sum - e.delta, 0),
     }));
     sendJson(res, 200, { events, users });
   },
@@ -2152,15 +2220,15 @@ const ROUTES = {
       setSessionCookie(req, res, '', 0);
       return sendJson(res, 200, {
         authenticated: false,
-        expiresAt: new Date(endOfSessionDay()).toISOString(),
-        sessionEndMinutes: SESSION_END_MINUTE,
+        expiresAt: null,
+        sessionTtlMs: SESSION_TTL_MS,
       });
     }
     sendJson(res, 200, {
       authenticated: true,
       user: publicUser(session.userId ? db.users[session.userId] : null),
       expiresAt: new Date(session.expiresAt).toISOString(),
-      sessionEndMinutes: SESSION_END_MINUTE,
+      sessionTtlMs: SESSION_TTL_MS,
       createdAt: session.createdAt,
     });
   },
@@ -2191,21 +2259,18 @@ const ROUTES = {
   'POST /api/files/:id/process': async (req, res, { params }) => {
     const file = db.files[params.id];
     if (!file) return sendError(res, 404, '文件不存在');
+    assertFileAccess(file, currentUser(req));
     if (isFileExpired(file)) {
       return sendError(res, 410, `源文件已过期（超过 ${ttlHours()} 小时）并被删除，请重新上传`, { expiresAt: new Date(fileExpiresAt(file)).toISOString() });
     }
-    // 去字幕必须走指定的接口：没配好就直接拒绝，不做任何本地替代
-    if (!eraseApi.ready) {
-      // 面向使用者的说明保持人话；技术细节只留在服务端日志与 missing 字段里
-      return sendError(res, 503, '去字幕服务尚未就绪，请联系管理员开通后再试', {
-        endpoint: eraseApi.endpoint,
-        missing: eraseApi.missing,
-      });
-    }
-
     const body = await readJsonBody(req);
     const operation = body.operation || DEFAULT_OPERATION;
     if (!OPERATIONS[operation]) return sendError(res, 400, `未知的处理类型 ${operation}`, { allowed: Object.keys(OPERATIONS) });
+    if (operationNeedsCloud(operation) && !eraseApi.ready) {
+      return sendError(res, 503, '云端处理服务尚未就绪，请联系管理员开通后再试', {
+        endpoint: eraseApi.endpoint, missing: eraseApi.missing,
+      });
+    }
     if (operation === 'enhance' && body.resolution !== undefined && !ENHANCE_RESOLUTIONS.includes(String(body.resolution))) {
       return sendError(res, 400, `未知的超清分辨率 ${body.resolution}`, { allowed: ENHANCE_RESOLUTIONS });
     }
@@ -2225,11 +2290,6 @@ const ROUTES = {
    * 只建任务记录，不立刻开始 —— 具体哪些任务开始，由「全部开始」或单行「开始任务」决定。
    */
   'POST /api/batches': async (req, res) => {
-    if (!eraseApi.ready) {
-      return sendError(res, 503, '去字幕服务尚未就绪，请联系管理员开通后再试', {
-        endpoint: eraseApi.endpoint, missing: eraseApi.missing,
-      });
-    }
     const diskCheck = diskGuard();
     if (!diskCheck.ok) {
       return sendError(res, 507, diskLowMessage(diskCheck.free), { freeBytes: diskCheck.free, minFreeBytes: diskCheck.minFree });
@@ -2244,6 +2304,11 @@ const ROUTES = {
     }
     const operation = body.operation || DEFAULT_OPERATION;
     if (!OPERATIONS[operation]) return sendError(res, 400, `未知的处理类型 ${operation}`, { allowed: Object.keys(OPERATIONS) });
+    if (operationNeedsCloud(operation) && !eraseApi.ready) {
+      return sendError(res, 503, '云端处理服务尚未就绪，请联系管理员开通后再试', {
+        endpoint: eraseApi.endpoint, missing: eraseApi.missing,
+      });
+    }
     if (body.resolution != null && !ENHANCE_RESOLUTIONS.includes(String(body.resolution))) {
       return sendError(res, 400, `未知的超清分辨率 ${body.resolution}`, { allowed: ENHANCE_RESOLUTIONS });
     }
@@ -2281,6 +2346,7 @@ const ROUTES = {
     for (const fid of fileIds) {
       const file = db.files[fid];
       if (!file) return sendError(res, 404, `文件不存在或已被清理：${fid}`);
+      assertFileAccess(file, currentUser(req));
       if (isFileExpired(file)) return sendError(res, 410, `源文件已过期：${file.name}`, { fileId: fid });
       files.push(file);
     }
@@ -2313,8 +2379,8 @@ const ROUTES = {
   'POST /api/batches/:id/items': async (req, res, { params }) => {
     const batch = db.batches?.[params.id];
     if (!batch) return sendError(res, 404, '批次不存在或已被清理');
-    if (!eraseApi.ready) {
-      return sendError(res, 503, '去字幕服务尚未就绪，请联系管理员开通后再试', {
+    if (operationNeedsCloud(batch.operation) && !eraseApi.ready) {
+      return sendError(res, 503, '云端处理服务尚未就绪，请联系管理员开通后再试', {
         endpoint: eraseApi.endpoint, missing: eraseApi.missing,
       });
     }
@@ -2332,6 +2398,7 @@ const ROUTES = {
     for (const fid of fileIds) {
       const file = db.files[fid];
       if (!file) return sendError(res, 404, `文件不存在或已被清理：${fid}`);
+      assertFileAccess(file, currentUser(req));
       if (isFileExpired(file)) return sendError(res, 410, `源文件已过期：${file.name}`, { fileId: fid });
       files.push(file);
     }
@@ -2344,7 +2411,16 @@ const ROUTES = {
       return sendError(res, 507, '服务器磁盘空间不足，无法接收这批任务', { needBytes, freeBytes: free, reserveBytes: DISK_RESERVE_BYTES });
     }
     if (batch.items.length + fileIds.length > MAX_BATCH_SIZE) return sendError(res, 400, `一批最多 ${MAX_BATCH_SIZE} 个文件`);
-    const added = appendFilesToBatch(batch, fileIds, body.durations || {}, { erasePreset: body.erasePreset || batch.erasePreset, enhance: body.enhance === undefined ? undefined : body.enhance === true, eraseRegion: body.eraseRegion, eraseMode: body.eraseMode, modelVersion: body.modelVersion });
+    const added = appendFilesToBatch(batch, fileIds, body.durations || {}, {
+      erasePreset: batch.erasePreset,
+      enhance: batch.enhance,
+      eraseRegion: batch.eraseRegion,
+      eraseMode: batch.eraseMode,
+      modelVersion: batch.modelVersion,
+      resolution: batch.resolution,
+      toolVersion: batch.toolVersion,
+      options: batch.options,
+    });
     saveDb();
     console.log(`[batch] ${batch.id} 追加 ${added.length} 个文件（其中 ${added.filter((a) => a.shared).length} 个复用已有任务），现共 ${batch.items.length} 个`);
     sendJson(res, 202, { added: added.length, ...serializeBatch(batch), poll: `/api/batches/${batch.id}` });
@@ -2380,17 +2456,51 @@ const ROUTES = {
     if (mode) batch.eraseMode = mode;
     let updated = 0;
     let running = 0;
+    const updatedTasks = new Set();
+    const replacements = new Map();
     for (const item of batch.items) {
-      const t = db.tasks[item.taskId];
+      let t = db.tasks[item.taskId];
       if (!t) continue;
       if (t.status === 'processing' || executing.has(t.id) || queue.includes(t.id)) { running += 1; continue; }
       if (t.status === 'succeeded' || t.status === 'expired') continue;
+      const sharedOutside = Object.entries(db.batches || {}).some(([bid, other]) =>
+        bid !== batch.id && (other.items || []).some((otherItem) => otherItem.taskId === t.id));
+      if (sharedOutside) {
+        let replacement = replacements.get(t.id);
+        if (!replacement) {
+          const file = db.files[t.fileId];
+          if (!file) continue;
+          replacement = createTaskForFile(file, {
+            operation: t.operation,
+            userId: t.userId,
+            enhance: t.enhance,
+            eraseRegion: eff.region,
+            eraseMode: eff.mode,
+            modelVersion: eff.model,
+            resolution: t.resolution,
+            toolVersion: t.toolVersion,
+            options: t.options,
+          });
+          replacement.erasePreset = eff.preset;
+          replacements.set(t.id, replacement);
+          updated += 1;
+        }
+        item.taskId = replacement.id;
+        item.shared = false;
+        item.reused = false;
+        item.attached = false;
+        item.sharedWithFileId = null;
+        continue;
+      }
+      if (updatedTasks.has(t.id)) continue;
+      updatedTasks.add(t.id);
       t.eraseRatioLocation = eff.region;
       t.mode = eff.mode;
       t.modelVersion = eff.model;
       t.erasePreset = eff.preset;
       if (t.status === 'pending') updated += 1;
     }
+    batch.taskIds = [...new Set(batch.items.map((item) => item.taskId).filter(Boolean))];
     saveDb();
     console.log(`[batch] ${batch.id} 擦除区域改为 ${key}（更新 ${updated} 个待开始任务${running ? `，${running} 个进行中不变` : ''}）`);
     sendJson(res, 200, { updated, running, ...serializeBatch(batch) });
@@ -2398,13 +2508,13 @@ const ROUTES = {
 
   /** 全部开始：把这一批里"未开始 / 失败 / 已取消"的任务一起排队 */
   'POST /api/batches/:id/start': async (req, res, { params }) => {
-    if (!eraseApi.ready) {
-      return sendError(res, 503, '去字幕服务尚未就绪，请联系管理员开通后再试', {
+    const batch = db.batches?.[params.id];
+    if (!batch) return sendError(res, 404, '批次不存在或已被清理');
+    if (operationNeedsCloud(batch.operation) && !eraseApi.ready) {
+      return sendError(res, 503, '云端处理服务尚未就绪，请联系管理员开通后再试', {
         endpoint: eraseApi.endpoint, missing: eraseApi.missing,
       });
     }
-    const batch = db.batches?.[params.id];
-    if (!batch) return sendError(res, 404, '批次不存在或已被清理');
     const body = await readJsonBody(req).catch(() => ({}));
     const diskCheck = diskGuard();
     if (!diskCheck.ok) {
@@ -2447,20 +2557,9 @@ const ROUTES = {
     }
     const body = await readJsonBody(req);
     const rawUrl = String(body.url || '').trim();
-    let parsed;
-    try { parsed = new URL(rawUrl); } catch { return sendError(res, 400, '链接格式不正确，请粘贴完整的 http/https 地址'); }
-    if (!/^https?:$/.test(parsed.protocol)) return sendError(res, 400, '只支持 http:// 或 https:// 的视频直链');
-    // 抖音/快手等分享短链：页面地址由 JS + 签名动态生成，纯服务端抓不到真实视频地址
-    if (/^(?:v\.douyin\.com|www\.iesdouyin\.com|v\.kuaishou\.com|www\.kuaishou\.com|xiaohongshu\.com|www\.xiaohongshu\.com|bilibili\.com|b23\.tv)$/i.test(parsed.hostname)) {
-      return sendError(res, 400, '暂不支持该平台的分享链接：抖音/快手/小红书等页面的视频地址由浏览器动态生成，服务端无法直接获取。请先在 App 里「保存到本地」，再到「去字幕」上传视频。');
-    }
-    let base = 'video.mp4';
-    try { base = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() || 'video.mp4'); } catch { /* 保持默认 */ }
-    const name = sanitizeName(base) || 'video.mp4';
-    const ext = (path.extname(name) || '').toLowerCase();
-    if (!VIDEO_EXT.has(ext)) {
-      return sendError(res, 415, `链接文件类型 ${ext || '(无扩展名)'} 不受支持；请使用直链（.mp4/.mov/.mkv/.avi/.flv/.ts/.wmv）`, { allowed: [...VIDEO_EXT] });
-    }
+    let info;
+    try { info = parseVideoUrl(rawUrl); await assertPublicRemoteUrl(info.url); }
+    catch (err) { return sendError(res, err.status || 400, err.message); }
     const dg = diskGuard();
     if (!dg.ok) return sendError(res, 507, diskLowMessage(dg.free), { freeBytes: dg.free, minFreeBytes: dg.minFree });
     const me = currentUser(req);
@@ -2471,7 +2570,7 @@ const ROUTES = {
     // 去水印 = 全屏模式（Text + 全画面 + v5.6）
     const eff = applyErasePreset({ preset: 'fullscreen' });
     const task = createTaskForFile(
-      { id: null, name, size: 0, ext, durationSec: duration, durationVerified: true,
+      { id: null, name: info.name, size: 0, ext: info.ext, durationSec: duration, durationVerified: true,
         createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + UPLOAD_TTL_MS).toISOString() },
       { operation: DEFAULT_OPERATION, userId: me.id, eraseRegion: eff.region, eraseMode: eff.mode, modelVersion: eff.model },
     );
@@ -2509,7 +2608,7 @@ const ROUTES = {
     const created = [];
     for (const raw of urls) {
       let info;
-      try { info = parseVideoUrl(raw); }
+      try { info = parseVideoUrl(raw); await assertPublicRemoteUrl(info.url); }
       catch (err) { skipped.push({ url: raw, reason: err.message }); continue; }
       let duration;
       try { duration = await probePool.run(() => probeVideoDuration(info.url)); }
@@ -2537,7 +2636,7 @@ const ROUTES = {
     if (!batch) return sendError(res, 404, '批次不存在或已被清理');
     const done = (batch.items || [])
       .map((it) => db.tasks[it.taskId])
-      .filter((t) => t && t.status === 'succeeded' && t.result && t.result.hasVideo !== false);
+      .filter((t) => t && t.status === 'succeeded' && t.result);
     if (!done.length) return sendError(res, 409, '这个批次还没有已完成的产物');
     if (done.length > MAX_BATCH_SIZE) return sendError(res, 400, `一次最多打包 ${MAX_BATCH_SIZE} 个`);
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '');
@@ -2562,7 +2661,7 @@ const ROUTES = {
           name = `${base} (${i})${ext}`;
         }
         used.add(name);
-        const localPath = path.join(OUTPUT_DIR, task.id, 'output.mp4');
+        const localPath = path.join(OUTPUT_DIR, task.id, task.result.srt ? 'subtitle.srt' : 'output.mp4');
         const useLocal = !task.result.remote && await fsp.stat(localPath).then((s) => s.isFile()).catch(() => false);
         if (useLocal) {
           const { createReadStream } = await import('node:fs');
@@ -2594,7 +2693,7 @@ const ROUTES = {
       .slice(0, 200)
       .map((t) => ({
         id: t.id, operation: t.operation, operationLabel: OPERATIONS[t.operation]?.label || t.operation,
-        status: t.status, progress: t.progress || 0, stage: t.stage || '', stageKey: t.stageKey || null,
+        status: t.status, started: !!t.started, progress: t.progress || 0, stage: t.stage || '', stageKey: t.stageKey || null,
         fileName: t.fileName || '', durationSec: t.durationSec || null,
         chargedCredits: t.chargedCredits || 0, error: t.error || null,
         createdAt: t.createdAt, finishedAt: t.finishedAt || null,
@@ -2750,13 +2849,13 @@ batch.items.splice(idx, 1);
 
   /** 单任务「开始任务」：把失败/已取消/未开始的任务重新排队（已完成需 force） */
   'POST /api/tasks/:id/start': async (req, res, { params }) => {
-    if (!eraseApi.ready) {
-      return sendError(res, 503, '去字幕服务尚未就绪，请联系管理员开通后再试', {
+    const task = db.tasks[params.id];
+    if (!task) return sendError(res, 404, '任务不存在');
+    if (operationNeedsCloud(task.operation) && !eraseApi.ready) {
+      return sendError(res, 503, '云端处理服务尚未就绪，请联系管理员开通后再试', {
         endpoint: eraseApi.endpoint, missing: eraseApi.missing,
       });
     }
-    const task = db.tasks[params.id];
-    if (!task) return sendError(res, 404, '任务不存在');
     const diskCheck = diskGuard();
     if (!diskCheck.ok) {
       return sendError(res, 507, diskLowMessage(diskCheck.free), { freeBytes: diskCheck.free, minFreeBytes: diskCheck.minFree });
@@ -2790,7 +2889,6 @@ batch.items.splice(idx, 1);
       return sendError(res, 409, '任务尚未完成', { status: task.status });
     }
 
-    const outExt = OPERATIONS[task.operation].outputExt;
     if (task.result.hasVideo && task.result.remote && remoteAlive(task)) {
       res.writeHead(302, { Location: task.remoteResultUrl, 'Cache-Control': 'no-store' });
       return res.end();
@@ -2802,11 +2900,11 @@ batch.items.splice(idx, 1);
       });
     }
     const target = task.result.hasVideo
-      ? path.join(OUTPUT_DIR, task.id, `output${outExt}`)
+      ? path.join(OUTPUT_DIR, task.id, 'output.mp4')
       : path.join(OUTPUT_DIR, task.id, 'poster.svg');
     serveFile(req, res, target, {
       downloadName: task.result.name,
-      mime: task.result.hasVideo ? MIME[outExt] || 'video/mp4' : 'image/svg+xml',
+      mime: task.result.hasVideo ? 'video/mp4' : 'image/svg+xml',
     });
   },
 
@@ -2816,8 +2914,7 @@ batch.items.splice(idx, 1);
       return sendError(res, 410, '源文件已过期，产物已删除');
     }
     if (!task || task.status !== 'succeeded') return sendError(res, 404, '产物不存在');
-    const outExt = OPERATIONS[task.operation].outputExt;
-    const map = { 'poster.svg': 'poster.svg', video: 'output' + outExt };
+    const map = { 'poster.svg': 'poster.svg', video: 'output.mp4' };
     const key = params.name === 'video' ? 'video' : params.name;
     const fileName = map[key];
     if (!fileName) return sendError(res, 404, '产物不存在');
@@ -2936,7 +3033,8 @@ const server = http.createServer(async (req, res) => {
         if (!r.ok) {
           db.abuseEvents.push({ id: `ab_${Date.now().toString(36)}`, type: 'rate_limit', key, userId: meUser?.id || null, ip, path: url.pathname, at: new Date().toISOString() });
           if (db.abuseEvents.length > 5000) db.abuseEvents = db.abuseEvents.slice(-5000);
-          if (meUser) { meUser.rateHits = (meUser.rateHits || 0) + 1; if (meUser.rateHits >= 5) meUser.suspended = { at: new Date().toISOString(), reason: '限流触发 5 次，自动暂停' }; }
+          // 限流事件用于审计；不要因累计五次瞬时拥塞永久停号，多标签页也可能自然触发。
+          if (meUser) meUser.rateHits = (meUser.rateHits || 0) + 1;
           saveDb();
           sendError(res, 429, `请求过于频繁，请 ${r.retryAfter} 秒后重试`, { retryAfter: r.retryAfter });
           return true;
@@ -2974,7 +3072,7 @@ const server = http.createServer(async (req, res) => {
       }
       return sendError(res, 401, '未登录或会话已过期，请重新登录', {
         login: '/api/auth/login',
-        sessionEndMinutes: SESSION_END_MINUTE,
+        sessionTtlMs: SESSION_TTL_MS,
       });
     }
 
@@ -3016,16 +3114,11 @@ server.listen(PORT, HOST, async () => {
     return { removed: 0 };
   });
   pruneSessions();
-  const sessionEndsAt = new Date(endOfSessionDay());
   console.log(`\n  ClipFlow · 全自动视频去字幕`);
   console.log(`  本机       http://127.0.0.1:${PORT}`);
   console.log(`  外部       ${baseUrl()}   (能力 URL ${baseUrl()}/f/vf_<id>)`);
   console.log(`  数据       ${DATA_DIR}`);
-  console.log(`  登录       Token 来源：${ACCESS_TOKEN.source}`);
-  if (ACCESS_TOKEN.source.startsWith('自动生成')) {
-    console.log(`             Token = ${ACCESS_TOKEN.token}`);
-  }
-  console.log(`             会话有效期至 ${sessionEndsAt.toLocaleString('zh-CN')}（此后需重新登录）`);
+  console.log(`  登录       手机号 + 密码；持续操作自动续期，闲置 1 小时失效`);
   console.log(`  去字幕接口 ${eraseApi.endpoint}`);
   console.log(
     eraseApi.ready

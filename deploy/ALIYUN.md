@@ -59,7 +59,7 @@ rsync -av --exclude 'data' --exclude '.git' \
 也可以先压缩再上传：
 
 ```bash
-tar --exclude data -czf clipflow.tar.gz server.mjs pipeline.mjs package.json README.md public deploy
+tar --exclude data -czf clipflow.tar.gz server.mjs pipeline.mjs media.mjs accounts.mjs ratelimit.mjs zip.mjs package.json README.md public deploy scripts
 scp clipflow.tar.gz root@<服务器公网IP>:/root/ && ssh root@<服务器公网IP> 'mkdir -p /root/clipflow-src && tar -xzf /root/clipflow.tar.gz -C /root/clipflow-src'
 ```
 
@@ -70,7 +70,7 @@ scp clipflow.tar.gz root@<服务器公网IP>:/root/ && ssh root@<服务器公网
 ```bash
 ssh root@<服务器公网IP>
 cd /root/clipflow-src
-sudo ACCESS_TOKEN='换成你的强口令' ./deploy/install.sh
+sudo ADMIN_PHONE='13800138000' ADMIN_PASSWORD='换成你的强密码' ./deploy/install.sh
 ```
 
 脚本会：装好 Node 20（从国内镜像）→ 创建 `clipflow` 系统用户 → 拷贝到 `/opt/clipflow` → 生成 `/opt/clipflow/clipflow.env`（0600）→ 注册并启动 systemd 服务 → 打印公网地址。
@@ -96,7 +96,8 @@ PORT=8787
 # 直接对外暴露用 0.0.0.0；前置 Nginx 后可改成 127.0.0.1
 HOST=0.0.0.0
 DATA_DIR=/opt/clipflow/data
-ACCESS_TOKEN=你的登录口令
+ADMIN_PHONE=13800138000
+ADMIN_PASSWORD=你的管理员密码
 
 # 去字幕接口
 AMK_API_KEY=你的接口密钥
@@ -196,8 +197,8 @@ curl -s -o /dev/null -w '%{http_code}\n' http://<公网IP>:8787/api/config      
 
 ## 十、安全建议
 
-1. `ACCESS_TOKEN` 用足够复杂的口令；公网务必上 HTTPS（否则口令与视频都会明文传输）。
+1. 管理员密码使用足够复杂的随机值；公网务必上 HTTPS（否则密码与视频都会明文传输）。
 2. 安全组只放行 22/80/443，SSH 来源限制到自己的 IP。
-3. 本服务默认给所有登录用户共享同一份文件空间，**面向公网时建议加一层来源限制**（Nginx `allow/deny` 或阿里云 WAF），后续再考虑按用户隔离。
+3. 物理视频 blob 会按内容复用，但账号文件记录、任务和结果相互隔离；面向公网时仍建议配置 Nginx 来源限制或阿里云 WAF。
 4. 上传内容是别人的视频，注意内部合规；`UPLOAD_TTL_HOURS=12` 是最后一道兜底。
 5. 开启 ECS 自动快照，避免误删数据目录。

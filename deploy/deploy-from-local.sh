@@ -6,14 +6,15 @@
 #   ssh-copy-id -i ~/.ssh/clipflow_ecs.pub root@<ECS公网IP>
 #
 # 用法：
-#   ./deploy/deploy-from-local.sh <ECS公网IP> '你的Token'
+#   ./deploy/deploy-from-local.sh <ECS公网IP> '管理员手机号' '管理员密码'
 #   AMK_API_KEY=xxx PUBLIC_BASE_URL=http://<ECS公网IP>:8787 \
-#     ./deploy/deploy-from-local.sh <ECS公网IP> '你的Token'
+#     ./deploy/deploy-from-local.sh <ECS公网IP> '13800138000' '强密码'
 # ============================================================
 set -euo pipefail
 
-ECS_IP=${1:?用法: $0 <ECS公网IP> [ACCESS_TOKEN]}
-ACCESS_TOKEN=${2:-}
+ECS_IP=${1:?用法: $0 <ECS公网IP> [ADMIN_PHONE] [ADMIN_PASSWORD]}
+ADMIN_PHONE=${2:-13800000000}
+ADMIN_PASSWORD=${3:-$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | head -c 20)}
 ECS_USER=${ECS_USER:-root}
 SSH_KEY=${SSH_KEY:-$HOME/.ssh/clipflow_ecs}
 APP_DIR=${APP_DIR:-/opt/clipflow}
@@ -53,7 +54,7 @@ tar --exclude='./data' --exclude='./node_modules' --exclude='./.git' \
 
 # ---------------------------------------------------------------- 3. 安装
 log "在服务器上执行安装（Node + systemd）"
-REMOTE_ENV="ACCESS_TOKEN=$(printf '%q' "$ACCESS_TOKEN") PORT=${PORT} APP_DIR=${APP_DIR} PUBLIC_BASE_URL=$(printf '%q' "$PUBLIC_BASE_URL")"
+REMOTE_ENV="ADMIN_PHONE=$(printf '%q' "$ADMIN_PHONE") ADMIN_PASSWORD=$(printf '%q' "$ADMIN_PASSWORD") PORT=${PORT} APP_DIR=${APP_DIR} PUBLIC_BASE_URL=$(printf '%q' "$PUBLIC_BASE_URL")"
 [ -n "${AMK_API_KEY:-}" ] && REMOTE_ENV="${REMOTE_ENV} AMK_API_KEY=$(printf '%q' "$AMK_API_KEY")"
 "${SSH[@]}" "cd ${REMOTE_SRC} && chmod +x deploy/install.sh && ${REMOTE_ENV} ./deploy/install.sh" \
   || die "远端安装失败，可登录后查看：journalctl -u clipflow -n 50 --no-pager"
@@ -78,7 +79,7 @@ if [ "$code" = "200" ]; then
   echo "  ✅ 公网首页 HTTP 200"
   echo -n "  ✅ 公网登录接口: "
   curl -s -m 8 -X POST "http://${ECS_IP}:${PORT}/api/auth/login" \
-    -H 'content-type: application/json' -d "{\"token\":\"${ACCESS_TOKEN}\"}" \
+    -H 'content-type: application/json' -d "{\"phone\":\"${ADMIN_PHONE}\",\"password\":\"${ADMIN_PASSWORD}\"}" \
     -o /dev/null -w 'HTTP %{http_code}\n'
   echo -n "  ✅ 未登录访问业务接口（期望 401）: "
   curl -s -o /dev/null -m 8 -w 'HTTP %{http_code}\n' "http://${ECS_IP}:${PORT}/api/config"
@@ -102,7 +103,8 @@ cat <<EOF
  部署完成
 ──────────────────────────────────────────────
  公网地址   http://${ECS_IP}:${PORT}
- 登录 Token ${ACCESS_TOKEN}
+ 管理员账号 ${ADMIN_PHONE}
+ 管理员密码 ${ADMIN_PASSWORD}
  安装目录   ${APP_DIR}      配置文件 ${APP_DIR}/clipflow.env
  服务管理   systemctl status clipflow / restart / journalctl -u clipflow -f
 

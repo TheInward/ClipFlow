@@ -4,7 +4,7 @@
 # 适用：阿里云 ECS / 轻量应用服务器，Ubuntu 22.04+ / Debian 12+ / Alibaba Cloud Linux 3
 #
 # 用法（在项目根目录执行）：
-#   sudo ACCESS_TOKEN='你的登录口令' ./deploy/install.sh
+#   sudo ADMIN_PHONE='13800138000' ADMIN_PASSWORD='强密码' ./deploy/install.sh
 #
 # 可选环境变量：
 #   APP_DIR=/opt/clipflow        安装目录
@@ -14,6 +14,8 @@
 #   NODE_MIRROR=...              指定镜像（默认按 阿里云 → npmmirror → 官方 依次尝试）
 #   AMK_API_KEY=...              去字幕接口密钥（可稍后改环境文件）
 #   PUBLIC_BASE_URL=...          对外访问地址（可稍后改环境文件）
+#   ADMIN_PHONE=...              初始管理员手机号（默认 13800000000）
+#   ADMIN_PASSWORD=...           初始管理员密码（不填则随机生成并打印）
 #
 # 仅准备文件、不装服务（用于本地演练）：
 #   SKIP_PACKAGES=1 SKIP_NODE=1 SKIP_SYSTEMD=1 APP_DIR=/tmp/clipflow SERVICE_USER=$(whoami) ./deploy/install.sh
@@ -177,17 +179,25 @@ copy_app() {
 # ---------------------------------------------------------------- 5. 环境文件
 write_env() {
   local env_file="$APP_DIR/clipflow.env"
+  local admin_phone="${ADMIN_PHONE:-13800000000}"
+  local admin_password="${ADMIN_PASSWORD:-}"
+  if [ -z "$admin_password" ]; then
+    admin_password="$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | head -c 20)"
+  fi
   if [ -f "$env_file" ]; then
     log "环境文件已存在，保留原有配置：${env_file}"
     # 仅补齐缺失项
     grep -q '^PORT=' "$env_file" || echo "PORT=${PORT}" >> "$env_file"
+    grep -q '^ADMIN_PHONE=' "$env_file" || echo "ADMIN_PHONE=${admin_phone}" >> "$env_file"
+    if ! grep -q '^ADMIN_PASSWORD=' "$env_file"; then
+      echo "ADMIN_PASSWORD=${admin_password}" >> "$env_file"
+      warn "旧环境缺少管理员配置，已创建 ${admin_phone} / ${admin_password}"
+    fi
     return
   fi
   log "生成环境文件 ${env_file}"
-  local token="${ACCESS_TOKEN:-}"
-  if [ -z "$token" ]; then
-    token="$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | head -c 20)"
-    warn "未提供 ACCESS_TOKEN，已随机生成：${token}"
+  if [ -z "${ADMIN_PASSWORD:-}" ]; then
+    warn "未提供 ADMIN_PASSWORD，已为管理员 ${admin_phone} 随机生成：${admin_password}"
   fi
   cat > "$env_file" <<EOF
 # ClipFlow 运行配置（修改后：systemctl restart ${SERVICE_NAME}）
@@ -196,8 +206,9 @@ PORT=${PORT}
 HOST=0.0.0.0
 DATA_DIR=${APP_DIR}/data
 
-# 登录口令（内部使用，建议足够复杂）
-ACCESS_TOKEN=${token}
+# 初始管理员账号（首次启动时创建；建议首次登录后修改密码）
+ADMIN_PHONE=${admin_phone}
+ADMIN_PASSWORD=${admin_password}
 
 # 去字幕接口：密钥 + 对外可访问地址
 # PUBLIC_BASE_URL 必须是公网能匿名访问到本服务的地址，去字幕接口靠它拉取源文件

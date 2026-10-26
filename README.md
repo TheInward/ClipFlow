@@ -1,12 +1,12 @@
 # watermarkremover · 全自动视频去水印 / 去字幕
 
-给公司内部员工用的 Web 网站：**输入 Token 登录 → 上传带字幕的视频 → 调用去字幕接口 → 在线预览 → 下载无字幕视频**。
+给公司内部员工用的 Web 网站：**手机号/密码登录 → 上传视频或粘贴直链 → 选择处理工具 → 在线预览 → 下载结果**。
 
 Node.js 无第三方包依赖；服务端计费时长校验需要系统安装 `ffprobe`（FFmpeg 提供，可用 `FFPROBE_PATH` 指定可执行文件）。安装后运行 `node server.mjs`。
 
-当前版本使用手机号/密码登录、积分计费和批次任务；下文部分 Token 示例属于历史版本。修复说明与验证方式见 [可靠性修复说明](docs/reliability-fixes.md)。
+当前版本使用手机号/密码登录、积分计费和批次任务。修复说明与验证方式见 [可靠性修复说明](docs/reliability-fixes.md)。
 
-**去字幕只走指定的接口**（火山引擎 mediakit `erase-video-subtitle-pro`），代码里没有任何本地替代实现，也不会静默降级成「假装处理」；接口没配好时提交任务会被直接拒绝并说明缺什么。
+字幕/水印擦除等云端工具走已配置的 MediaKit 接口，不会静默降级成“假装处理”；仅“区域遮挡/消物”明确使用本地 FFmpeg。所选工具依赖未就绪时，提交会被拒绝并说明缺少的配置。
 
 ---
 
@@ -50,7 +50,7 @@ Node.js 无第三方包依赖；服务端计费时长校验需要系统安装 `f
 ## 3. 运行
 
 > 要部署到阿里云（公网地址 + systemd + Nginx + HTTPS/备案），见 **[deploy/ALIYUN.md](deploy/ALIYUN.md)**，一条命令完成安装：
-> `sudo ACCESS_TOKEN='你的口令' ./deploy/install.sh`
+> `sudo ADMIN_PHONE='13800138000' ADMIN_PASSWORD='强密码' ./deploy/install.sh`
 
 
 ```bash
@@ -59,7 +59,7 @@ npm start                 # 等价于 node server.mjs
 # 打开 http://127.0.0.1:8787
 ```
 
-启动日志会打印：登录 Token、会话到期时间、去字幕接口地址与配置是否完整。
+启动日志会打印：登录方式、去字幕接口地址、配置完整性和并发参数。
 
 ### 环境变量
 
@@ -73,8 +73,8 @@ npm start                 # 等价于 node server.mjs
 | `AMK_POLL_MS` | `3000` | 轮询间隔 |
 | `AMK_TIMEOUT_MS` | `1800000` | 任务总超时（30 分钟） |
 | `AMK_DOWNLOAD_TIMEOUT_MS` | `600000` | 回传产物的超时 |
-| `ACCESS_TOKEN` | 自动生成 | 登录口令；不配则生成随机值并写入 `data/access-token.txt` |
-| `SESSION_END_MINUTE` | `1439`（23:59） | 会话每日失效的分钟点 |
+| `ADMIN_PHONE` / `ADMIN_PASSWORD` | 空 | 启动时创建或提升初始管理员账号 |
+| `WELCOME_CREDITS` | `0` | 新注册用户赠送积分 |
 | `LOGIN_MAX_FAILS` / `LOGIN_WINDOW_MS` | `10` / `600000` | 同 IP 失败次数上限与统计窗口（超出返回 429） |
 | `UPLOAD_TTL_HOURS` | `12` | 源文件与产物的存活小时数 |
 | `SWEEP_INTERVAL_MS` | `300000` | 过期扫描间隔（启动时也会扫一次） |
@@ -82,16 +82,16 @@ npm start                 # 等价于 node server.mjs
 | `MAX_UPLOAD_BYTES` | `104857600` | 单文件上限（100 MB） |
 | `MAX_BATCH_SIZE` | `30` | 一批最多多少个文件 |
 | `PROCESS_CONCURRENCY` | `2` | 同时处理的任务数 |
-| `DATA_DIR` | `./data` | 上传、产物、Token、`db.json` 的存放目录 |
+| `DATA_DIR` | `./data` | 上传、产物和 `db.json` 的存放目录 |
 
 ---
 
 ## 4. 登录与会话
 
-- 登录页只输一个 Token，服务端比对 `sha256(输入)` 与 `sha256(ACCESS_TOKEN)`（常量时间比较），成功后签发 HttpOnly 会话 Cookie，前端不存任何凭证。
+- 用户使用 11 位手机号与密码注册/登录；密码使用 scrypt 加盐保存，成功后签发 HttpOnly 会话 Cookie，前端不存密码。
 - **会话保持**：刷新 / 重开页面自动恢复，无需重复输入。
-- **每天 23:59:59 失效**：会话记录的 `expiresAt` 就是当天 23:59:59，服务端每次请求都校验，跨天后必须重新登录；前端顶栏实时显示「会话剩余」，归零自动回到登录页。
-- 同 IP 10 分钟内失败 10 次返回 429，避免 Token 被暴力枚举。
+- **滚动 1 小时失效**：每次有效请求会续期，闲置一小时后需重新登录；前端顶栏显示剩余时间。
+- 同 IP 失败 3 次后要求计算验证码，达到窗口上限后返回 429。
 
 ---
 
@@ -99,7 +99,8 @@ npm start                 # 等价于 node server.mjs
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
-| `POST` | `/api/auth/login` | 公开 | `{ token }` → 200 + 会话 Cookie（失败 401，频繁失败 429） |
+| `POST` | `/api/auth/register` | 公开 | `{ phone, password }` → 注册并登录 |
+| `POST` | `/api/auth/login` | 公开 | `{ phone, password }` → 200 + 会话 Cookie（失败 401，频繁失败 429） |
 | `GET` | `/api/auth/session` | 公开 | `{ authenticated, expiresAt }` |
 | `POST` | `/api/auth/logout` | 公开 | 注销并清 Cookie |
 | `GET` | `/api/config` | 登录 | 对外基址、上限、处理类型、阶段、TTL、会话策略 |
@@ -113,8 +114,8 @@ npm start                 # 等价于 node server.mjs
 | `GET` | `/api/download/:taskId` | 登录 | 下载无字幕视频（`attachment`；过期任务 410） |
 
 ```bash
-TOKEN=内部口令; B=http://127.0.0.1:8787
-curl -s -c jar.txt -X POST $B/api/auth/login -H 'content-type: application/json' -d "{\"token\":\"$TOKEN\"}"
+PHONE=13800138000; PASSWORD='你的密码'; B=http://127.0.0.1:8787
+curl -s -c jar.txt -X POST $B/api/auth/login -H 'content-type: application/json' -d "{\"phone\":\"$PHONE\",\"password\":\"$PASSWORD\"}"
 curl -s -b jar.txt -X POST $B/api/uploads -H 'X-File-Name: clip.mp4' --data-binary @clip.mp4
 curl -s -b jar.txt -X POST $B/api/files/vf_xxx/process -H 'content-type: application/json' -d '{"operation":"erase-subtitle"}'
 curl -s -b jar.txt $B/api/tasks/task_yyy
@@ -199,7 +200,7 @@ clipflow/
 │   ├── md5.js          # 增量 MD5（RFC 1321）+ 分片读取
 │   ├── md5-worker.js   # Worker 里分片算 MD5
 │   └── favicon.svg
-└── data/               # 运行时：uploads/ outputs/ db.json access-token.txt（已 gitignore）
+└── data/               # 运行时：uploads/ outputs/ thumbs/ db.json（已 gitignore）
 ```
 
 ---
@@ -209,12 +210,12 @@ clipflow/
 - 单进程内存队列：进程重启后处于 `processing` 的任务需要重新提交。
 - 取消任务只停止本地轮询并标记 canceled，不会撤销接口侧已提交的任务（上游通常也不支持取消）。
 - 单一整文件上传，没有分片/断点续传：超大文件（>100 MB）会被拒绝。
-- 会话按「当天 23:59」失效：23:58 登录只剩 1 分钟（可用 `SESSION_END_MINUTE` 调整）。
-- 所有登录用户共用一个 Token，且共享同一份文件/MD5 索引空间，没有多租户隔离。
+- 会话闲置 1 小时失效；持续操作会自动续期。
+- 物理视频 blob 可按内容复用，但文件记录、MD5 秒传索引、任务和结果均按账号隔离。
 
 ## 12. 上线前清单
 
-1. `ACCESS_TOKEN` 用密码管理器下发，公网入口必须 HTTPS（HTTPS 下会话 Cookie 自动带 `Secure`）。
+1. 管理员密码用密码管理器保管，公网入口必须 HTTPS（HTTPS 下会话 Cookie 自动带 `Secure`）。
 2. 网关层给登录、上传、提交任务分别限流；按人/按天限制上传量与并发。
 3. 上传内容校验（`ffprobe` 容器/时长/分辨率）、病毒扫描与内容审核。
 4. 反向代理：放开 `client_max_body_size`、`proxy_request_buffering off`（保持流式上传），保留 `Range` 透传（预览拖进度条依赖它）。

@@ -889,6 +889,7 @@ async function handleUpload(req, res) {
     existing.names = [...new Set([...(existing.names || [existing.name]), rawName])].slice(0, 20);
     existing.lastSeenAt = new Date().toISOString();
     existing.hits = (existing.hits || 1) + 1;
+    existing.expiresAt = new Date(Date.now() + UPLOAD_TTL_MS).toISOString();
     saveDb();
     console.log(
       `[dedupe] ${digest} 已存在（${existing.id}），复用服务器文件，本次未占用新空间 ${formatBytes(received)}`,
@@ -1623,8 +1624,6 @@ function createTaskForFile(file, { operation = DEFAULT_OPERATION, userId, enhanc
     resolution: resolution || null,
     toolVersion: toolVersion || null,
     options: options || null,
-    options: options || null,
-    toolVersion: toolVersion || null,
     operation,
     operationLabel: OPERATIONS[operation].label,
     mode,                                        // Subtitle | Text
@@ -1729,11 +1728,15 @@ function appendFilesToBatch(batch, fileIds, durations = {}, overrides = {}) {
 
 function createBatch({ fileIds, operation = DEFAULT_OPERATION, durations = {}, userId, enhance = false, erasePreset = 'standard', eraseRegion, eraseMode, modelVersion, resolution = null, toolVersion = null, options = null } = {}) {
   db.batches ||= {};
+  const eff = applyErasePreset({ preset: erasePreset, region: eraseRegion, mode: eraseMode, model: modelVersion });
   const batch = {
     id: id('batch'),
     createdAt: new Date().toISOString(),
     operation,
-    erasePreset: resolveErasePreset(erasePreset),
+    erasePreset: eff.preset,
+    eraseRegion: eff.region,
+    eraseMode: eff.mode,
+    modelVersion: eff.model,
     enhance: !!enhance,
     resolution: resolution || null,
     toolVersion: toolVersion || null,
@@ -1742,7 +1745,15 @@ function createBatch({ fileIds, operation = DEFAULT_OPERATION, durations = {}, u
     taskIds: [],
     items: [],
   };
-  appendFilesToBatch(batch, fileIds, durations, { erasePreset: batch.erasePreset, eraseRegion, eraseMode, modelVersion, resolution: batch.resolution, toolVersion: batch.toolVersion, options: batch.options });
+  appendFilesToBatch(batch, fileIds, durations, {
+    erasePreset: batch.erasePreset,
+    eraseRegion: batch.eraseRegion,
+    eraseMode: batch.eraseMode,
+    modelVersion: batch.modelVersion,
+    resolution: batch.resolution,
+    toolVersion: batch.toolVersion,
+    options: batch.options,
+  });
   db.batches[batch.id] = batch;
   saveDb();
   const reusedN = batch.items.filter((i) => i.reused).length;
@@ -1939,8 +1950,8 @@ async function assertPublicRemoteUrl(rawUrl) {
     throw Object.assign(new Error('视频链接不能包含用户名或密码'), { status: 400 });
   }
   const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  if (host === 'localhost' || host.endsWith('.localhost') || isPrivateAddress(host)) {
-    if (net.isIP(host)) throw Object.assign(new Error('视频链接不能指向本机或内网地址'), { status: 400 });
+  if (host === 'localhost' || host.endsWith('.localhost') || (net.isIP(host) && isPrivateAddress(host))) {
+    throw Object.assign(new Error('视频链接不能指向本机或内网地址'), { status: 400 });
   }
   let addresses;
   try { addresses = await dns.lookup(host, { all: true, verbatim: true }); }
@@ -2274,11 +2285,27 @@ const ROUTES = {
     if (operation === 'enhance' && body.resolution !== undefined && !ENHANCE_RESOLUTIONS.includes(String(body.resolution))) {
       return sendError(res, 400, `未知的超清分辨率 ${body.resolution}`, { allowed: ENHANCE_RESOLUTIONS });
     }
+    if (body.toolVersion != null && !ENHANCE_VERSIONS.includes(String(body.toolVersion))) {
+      return sendError(res, 400, `未知的超清版本 ${body.toolVersion}`, { allowed: ENHANCE_VERSIONS });
+    }
+    if (body.options != null && (typeof body.options !== 'object' || Array.isArray(body.options))) {
+      return sendError(res, 400, 'options 必须是对象');
+    }
 
     // 计费只使用服务端核实的视频时长。
     await fileDuration(file);
     const eff = applyErasePreset({ preset: body.erasePreset, region: body.eraseRegion, mode: body.eraseMode, model: body.modelVersion });
-    const task = createTaskForFile(file, { operation, userId: currentUser(req)?.id, enhance: body.enhance === true, eraseRegion: eff.region, eraseMode: eff.mode, modelVersion: eff.model });
+    const task = createTaskForFile(file, {
+      operation,
+      userId: currentUser(req)?.id,
+      enhance: body.enhance === true,
+      eraseRegion: eff.region,
+      eraseMode: eff.mode,
+      modelVersion: eff.model,
+      resolution: body.resolution || null,
+      toolVersion: body.toolVersion || null,
+      options: body.options && typeof body.options === 'object' ? body.options : null,
+    });
     try { await startTask(task, currentUser(req)); }
     catch (err) { refundTaskCredits(task, 'refund:failed'); delete db.tasks[task.id]; saveDb(); throw err; }
     console.log(`[task] ${task.id} 去字幕 <- ${file.id}`);
@@ -2452,8 +2479,11 @@ const ROUTES = {
       model: body.modelVersion === undefined ? undefined : body.modelVersion,
     });
     batch.erasePreset = eff.preset;
-    if (body.eraseRegion !== undefined) batch.eraseRegion = key;
-    if (mode) batch.eraseMode = mode;
+    // 批次是「追加文件」时的参数来源：必须保存解析后的完整设置，
+    // 否则改预设后追加的任务仍是旧 mode/model（实测出现过 f1=Text/v5.6、f2=Subtitle/null）
+    batch.eraseRegion = eff.region;
+    batch.eraseMode = eff.mode;
+    batch.modelVersion = eff.model;
     let updated = 0;
     let running = 0;
     const updatedTasks = new Set();

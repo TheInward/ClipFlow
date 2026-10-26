@@ -26,6 +26,7 @@ async function freePort() {
 async function mockProbe(dir) {
   const file = path.join(dir, 'ffprobe');
   await fs.writeFile(file, `#!${process.execPath}\nconst fs = require('node:fs');\nconst duration = Number(fs.readFileSync(process.argv.at(-1), 'utf8'));\nconsole.log(JSON.stringify({streams: [{codec_type:'video',duration}],format:{duration}}));\n`, { mode: 0o755 });
+  await fs.writeFile(path.join(dir, 'ffmpeg'), `#!${process.execPath}\nconst fs = require('node:fs');\nfs.writeFileSync(process.argv.at(-1), Buffer.alloc(2048));\n`, { mode: 0o755 });
   return file;
 }
 
@@ -39,13 +40,17 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     if (req.method === 'POST' && req.url.startsWith('/tools/')) {
       let raw = ''; for await (const chunk of req) raw += chunk;
       const id = `remote_${++serial}`;
-      upstreamTasks.set(id, { type: req.url.includes('enhance') ? 'enhance' : 'erase', state: 'processing', input: JSON.parse(raw) });
+      const type = req.url.includes('enhance') ? 'enhance' : req.url.includes('asr-subtitles') ? 'asr' : 'erase';
+      upstreamTasks.set(id, { type, state: 'processing', input: JSON.parse(raw) });
       return json({ task_id: id });
     }
     if (req.method === 'GET' && req.url.startsWith('/tasks/')) {
       const task = upstreamTasks.get(req.url.slice('/tasks/'.length));
       if (!task) { res.statusCode = 404; return json({}); }
-      return json({ status: task.state, result: { video_url: `http://127.0.0.1:${upstream.address().port}/asset/${task.type}`, duration: 3.2 } });
+      const result = task.type === 'asr'
+        ? { subtitles: [{ start_time: 0, end_time: 1, subtitle_text: 'hello' }] }
+        : { video_url: `http://127.0.0.1:${upstream.address().port}/asset/${task.type}`, duration: 3.2 };
+      return json({ status: task.state, result });
     }
     res.statusCode = 404; json({});
   });
@@ -124,6 +129,8 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     const encoded = '%74' + aId.slice(1);
     assert.equal((await api(`/api/tasks/${encoded}`,{user:'b'})).status,404);
     assert.equal((await api(`/api/tasks/${encoded}`,{user:'b',method:'DELETE'})).status,404);
+    assert.equal((await api('/api/batches',{method:'POST',user:'b',body:{fileIds:[file]}})).status,404);
+    assert.equal((await api(`/api/files/${file}`,{method:'DELETE',user:'b'})).status,404);
   });
   await t.test('batch preserves tool options and enhancement version', async () => {
     const face = await batch(file, { operation: 'face-blur', options: { maskMode: 'blur', strength: 'high' } });
@@ -133,6 +140,17 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     const enhanceTask = await task(enhance.items[0].taskId);
     assert.equal(enhanceTask.resolution, '2k');
     assert.equal(enhanceTask.toolVersion, 'professional');
+
+    const custom = await batch(file, { eraseRegion: 'top', eraseMode: 'Text', modelVersion: 'v5' });
+    const extraFile = await upload(4.2);
+    const appended = await api(`/api/batches/${custom.batch.id}/items`, {
+      method: 'POST', body: { fileIds: [extraFile] },
+    });
+    assert.equal(appended.status, 202, JSON.stringify(appended.data));
+    const appendedTask = await task(appended.data.items.at(-1).taskId);
+    assert.equal(appendedTask.mode, 'Text');
+    assert.equal(appendedTask.modelVersion, 'v5');
+    assert.equal(appendedTask.eraseRatioLocation[0].bottom_right_y, 0.5);
   });
   await t.test('server duration determines price; admin-triggered refunds go to the actual payer',async()=>{
     assert.equal((await start(aId,'admin')).status,202);
@@ -199,6 +217,21 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     assert.equal(await credits(),before-4);
     await cancel(r.data.task.id);
     assert.equal(await credits(),before);   // 取消立即退款
+  });
+  await t.test('ASR burn keeps options and downloads the generated MP4 path', async () => {
+    const r = await batch(file, { operation: 'asr-subtitles', options: { language: 'eng-US', burn: true } });
+    const tid = r.items[0].taskId;
+    assert.equal((await start(tid)).status, 202);
+    await until(() => [...upstreamTasks.values()].some((x) => x.type === 'asr'));
+    const remote = [...upstreamTasks.values()].find((x) => x.type === 'asr');
+    assert.equal(remote.input.language, 'eng-US');
+    remote.state = 'completed';
+    await until(async () => (await task(tid)).status === 'succeeded');
+    const completed = await task(tid);
+    assert.match(completed.result.name, /\.mp4$/);
+    const downloaded = await api(`/api/download/${tid}`);
+    assert.equal(downloaded.status, 200);
+    assert.match(downloaded.headers.get('content-type'), /video\/mp4/);
   });
 });
 

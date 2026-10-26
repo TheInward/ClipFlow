@@ -100,7 +100,7 @@
         <div class="bento2">
           <button class="tile2 big" type="button" data-tool-tab="erase">
             <span class="badge2">核心</span>
-            <h3>视频去文字</h3><p>逐帧擦除硬字幕、水印文字，保留画面细节</p>
+            <div class="big-body"><h3>视频去文字</h3><p>逐帧擦除硬字幕、水印文字，保留画面细节</p></div>
           </button>
           <button class="tile2" type="button" data-tool-tab="enhance">
             <div class="g2">超</div><h3>超清画质</h3><p>去噪 / 锐化 / 超分</p>
@@ -286,6 +286,18 @@
 
         <div class="list" id="list"></div>
       </section>
+      <aside class="card side-help" id="toolsAside">
+        <div class="card-head"><div><h2>怎么用</h2><p class="muted">三步完成，支持批量</p></div></div>
+        <ol class="steps2">
+          <li><b>1</b><span>拖入或点击选择视频（最多 30 个 / 单个 100MB）</span></li>
+          <li><b>2</b><span>勾选任务，点「批量开始」</span></li>
+          <li><b>3</b><span>完成后在行内预览、下载或打包</span></li>
+        </ol>
+        <div class="aside-recent">
+          <div class="aside-title">最近资产</div>
+          <div class="aside-list" id="toolsRecent"><div class="muted">加载中…</div></div>
+        </div>
+      </aside>
       </div><!-- /ws2 -->
       <!-- ===================== 链接去水印 ===================== -->
       <section class="card" id="linkCard" hidden>

@@ -929,3 +929,56 @@ body{background:var(--canvas)}
 .task-prog i{display:block;height:100%;border-radius:99px;background:#111;transition:width .3s}
 .task-act{display:flex;gap:6px}
 .task-act .btn{height:30px;padding:0 11px;font-size:12px;border-radius:9px}
+
+/* ============================================================================
+ * 布局修正（主界面留白/错位）
+ * ========================================================================== */
+
+/* 首页首屏收紧：原来 518px 高、标题到指令栏空隙过大 */
+.hero2{padding:28px 0 4px}
+.hero2 h1{font-size:clamp(28px,4.4vw,46px);margin:12px 0 12px;line-height:1.12}
+.hero2 .eyebrow{margin-bottom:2px}
+.hero-lead{max-width:560px;margin:0 auto 20px;font-size:14.5px}
+.hero-composer{max-width:620px}
+.cap-in{padding:7px 7px 7px 16px}
+.sugg{margin:14px 0 0;gap:7px}
+.sugg button{height:30px;font-size:12px;padding:0 12px}
+.stats2{margin:26px auto 0;max-width:780px}
+.stats2>div{padding:13px 16px}
+.stats2 b{font-size:19px}
+.sec-head2{margin:44px 0 14px}
+
+/* Bento：大卡改为「占 2 列 × 1 行」，不再出现 2×2 的巨大空白 */
+.bento2{grid-template-columns:repeat(4,1fr);gap:12px}
+.tile2.big{grid-column:span 2;grid-row:auto;min-height:148px;justify-content:space-between;padding:18px;
+  background:radial-gradient(360px 200px at 18% 0%,#f5f5f8,transparent 62%),#fff}
+.tile2.big .big-body{margin-top:auto}
+.tile2.big h3{font-size:19px;letter-spacing:-.02em;margin:0 0 4px}
+.tile2.big p{font-size:12.5px;margin:0}
+.tile2 .g2{margin-bottom:10px}
+@media (max-width:980px){ .bento2{grid-template-columns:repeat(2,1fr)} .tile2.big{grid-column:span 2} }
+
+/* 页头：会话倒计时与操作区分开 */
+.session-left{padding-right:10px;border-right:1px solid var(--line);margin-right:2px;font-size:11.5px}
+
+/* 工具页：标题上方留白收紧 + 右列指引卡 */
+.page-head{padding-top:4px}
+.page-head h1{margin-top:2px}
+#pageTools .page-head{margin-bottom:14px}
+.ws2{align-items:start}
+.side-help{border-radius:22px;padding:20px;display:flex;flex-direction:column;gap:14px}
+.side-help .card-head{margin-bottom:2px}
+.side-help h2{font-size:15px}
+.steps2{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.steps2 li{display:flex;gap:10px;align-items:flex-start;font-size:12.5px;color:var(--ink-2);line-height:1.55}
+.steps2 b{flex:0 0 20px;height:20px;border-radius:50%;background:#111;color:#fff;font-size:11px;
+  display:grid;place-items:center;font-weight:600;margin-top:1px}
+.aside-recent{border-top:1px solid var(--line-2);padding-top:14px}
+.aside-title{font:500 11px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3);margin-bottom:10px}
+.aside-list{display:flex;flex-direction:column;gap:8px}
+.aside-row{display:flex;align-items:center;gap:10px;padding:8px;border:1px solid var(--line);border-radius:10px;background:#fff;cursor:pointer}
+.aside-row:hover{background:#fafafb;border-color:#d5d5da}
+.aside-row .ico{width:30px;height:30px;flex:0 0 30px;border-radius:8px;background:#f3f3f5;display:grid;place-items:center;font-size:12px;color:#111}
+.aside-row .nm{font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.aside-row .mt{font-size:10.5px;color:var(--ink-3)}
+@media (max-width:1100px){ .side-help{display:none} }

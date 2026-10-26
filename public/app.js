@@ -705,6 +705,7 @@ function renderNow() {
   // 上传阶段（还没建批次）也要让用户立刻看到每一行的「计算 MD5 / 上传中 x%」，
   // 否则选完文件后界面会有几十秒到几分钟毫无反应。
   el.batchCard.hidden = rows.length === 0;
+  try { syncToolsAside(); } catch { /* 忽略 */ }
 }
 
 function rowNode(r) {
@@ -1775,6 +1776,7 @@ function switchPage(page) {
     b.classList.toggle('is-active', b.dataset.page === page);
   });
   if (page === 'assets') loadAssets();
+  if (page === 'tools') { loadAssets().then(syncToolsAside).catch(() => syncToolsAside()); }
   if (page === 'home') { loadAssets().then(renderHome).catch(() => renderHome()); }
   if (page === 'tasks') loadTasks();
   if (page === 'studio' && el.studioNotice) {
@@ -2096,3 +2098,36 @@ if (el.taskFilters) {
     renderTaskFilters(); renderTasks();
   });
 }
+
+/* ============================================================================
+ * 工具页右列：批次未建立时显示「使用指引 + 最近资产」（避免右侧大片空白）
+ * ========================================================================== */
+function syncToolsAside() {
+  const aside = document.getElementById('toolsAside');
+  if (!aside) return;
+  const batchCard = document.getElementById('batchCard');
+  const hasBatch = batchCard && !batchCard.hidden;
+  aside.hidden = hasBatch || currentPage !== 'tools';
+  if (aside.hidden) return;
+  const box = document.getElementById('toolsRecent');
+  if (!box) return;
+  const list = (assetList || []).slice(0, 3);
+  box.innerHTML = '';
+  if (!list.length) {
+    box.innerHTML = '<div class="muted" style="font-size:12px">还没有素材，上传后会出现在这里</div>';
+    return;
+  }
+  const ICON = { video: '▶', text: 'T', audio: '♫', image: '▣' };
+  for (const a of list) {
+    const row = document.createElement('div');
+    row.className = 'aside-row';
+    row.innerHTML = `<div class="ico">${ICON[a.kind] || '▶'}</div>
+      <div style="min-width:0">
+        <div class="nm">${escapeHtml(a.name || '')}</div>
+        <div class="mt">${a.source === 'upload' ? '上传' : '处理'}${a.sizeText ? ' · ' + a.sizeText : ''}</div>
+      </div>`;
+    row.addEventListener('click', () => switchPage('assets'));
+    box.appendChild(row);
+  }
+}
+

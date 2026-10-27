@@ -104,7 +104,7 @@
             <label class="composer-select"><span class="select-icon" aria-hidden="true">▧</span><select id="generationMode" aria-label="创作方式"><option value="text">文生视频</option><option value="multi_image">多图生视频</option><option value="keyframes">首尾帧生视频</option></select></label>
 
             <div class="composer-specs">
-              <label><select id="videoRatio" aria-label="画幅"><option value="16:9">16:9</option><option value="9:16">9:16</option><option value="1:1">1:1</option></select></label>
+              <label><select id="videoRatio" aria-label="画幅"><option value="9:16">9:16</option></select></label>
               <span>/</span>
               <label><select id="videoResolution" aria-label="清晰度"><option value="768p">768P</option><option value="480p">480P</option></select></label>
               <span>/</span>
@@ -173,7 +173,6 @@
       <nav class="tabbar" id="tabbar" role="tablist">
         <button class="tab is-active" type="button" data-tab="link" role="tab">去水印</button>
         <button class="tab" type="button" data-tab="erase" role="tab">去字幕</button>
-        <button class="tab" type="button" data-tab="asr" role="tab">加字幕</button>
         <button class="tab" type="button" data-tab="enhance" role="tab">画质超清</button>
         <button class="tab" type="button" data-tab="transcode" role="tab">视频压缩</button>
       </nav>
@@ -223,19 +222,6 @@
             <option value="fullscreen">全屏模式（更彻底，耗时约 3 倍）</option>
           </select>
           <span class="hint-inline" id="eraseHint">标准模式：识别常规字幕（快）；全屏模式：擦画面任何位置的文字与文字水印，耗时明显更长</span>
-        </div>
-        <div class="region-row" id="asrRow" hidden>
-          <label for="asrLang">识别语种</label>
-          <select id="asrLang">
-            <option value="auto" selected>自动探测</option>
-            <option value="cmn-Hans-CN">简体中文</option>
-            <option value="eng-US">英语</option>
-          </select>
-          <label class="chk-inline" for="asrBurn">
-            <input id="asrBurn" type="checkbox" />
-            <span>烧录成视频</span>
-          </label>
-          <span class="hint-inline">默认导出带时间戳的 SRT 字幕文件；勾选「烧录成视频」会用服务器本地 ffmpeg 把字幕压进画面（较慢，建议 ≤3 分钟短片）</span>
         </div>
         <div class="region-row" id="tcRow" hidden>
           <label for="tcProfile">压缩预设</label>
@@ -405,7 +391,7 @@
   </div><!-- /shell -->
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/app.js?v=2026102709" type="module"></script>
+  <script src="/app.js?v=2026102710" type="module"></script>
   <div class="admin-mask" id="adminMask" hidden>
     <div class="admin-panel" role="dialog" aria-modal="true" aria-labelledby="adminTitle">
       <div class="admin-head">

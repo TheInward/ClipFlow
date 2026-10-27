@@ -129,8 +129,16 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     assert.deepEqual(config.data.videoGeneration.workflows, {
       text:'minimax_h3_lightx2v_no_pic', multi_image:'minimax_h3_lightx2v_v5_15s', keyframes:'minimax_h3_lightx2v',
     });
+    const horizontal = await api('/api/video-generations',{user:'admin',method:'POST',body:{
+      mode:'text', workflow:'minimax_h3_lightx2v_no_pic', prompt:'invalid ratio', parameters:{duration:5,resolution:'768p横'}, referenceIds:[],
+    }});
+    assert.equal(horizontal.status,400); assert.match(horizontal.data.error,/9:16/);
+    const invalidDuration = await api('/api/video-generations',{user:'admin',method:'POST',body:{
+      mode:'text', workflow:'minimax_h3_lightx2v_no_pic', prompt:'invalid duration', parameters:{duration:7,resolution:'768p竖'}, referenceIds:[],
+    }});
+    assert.equal(invalidDuration.status,400); assert.match(invalidDuration.data.error,/5 秒、10 秒或 15 秒/);
     const text = await api('/api/video-generations',{user:'admin',method:'POST',body:{
-      mode:'text', workflow:'minimax_h3_lightx2v_no_pic', prompt:'text prompt', parameters:{duration:5,resolution:'768p横'}, referenceIds:[],
+      mode:'text', workflow:'minimax_h3_lightx2v_no_pic', prompt:'text prompt', parameters:{duration:5,resolution:'768p竖'}, referenceIds:[],
     }});
     assert.equal(text.status,202,JSON.stringify(text.data));
     const a1=await uploadReference('a1.jpg'), a2=await uploadReference('a2.jpg');
@@ -140,7 +148,7 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     assert.equal(multi.status,202,JSON.stringify(multi.data));
     const b1=await uploadReference('b1.jpg','b'), b2=await uploadReference('b2.jpg','b');
     const frames = await api('/api/video-generations',{user:'b',method:'POST',body:{
-      mode:'keyframes', workflow:'minimax_h3_lightx2v', prompt:'transition prompt', parameters:{duration:5,resolution:'480p横'}, referenceIds:[b1.id,b2.id],
+      mode:'keyframes', workflow:'minimax_h3_lightx2v', prompt:'transition prompt', parameters:{duration:5,resolution:'480p竖'}, referenceIds:[b1.id,b2.id],
     }});
     assert.equal(frames.status,202,JSON.stringify(frames.data));
     assert.equal(videoWorkflowCalls[0].workflow,'minimax_h3_lightx2v_no_pic');

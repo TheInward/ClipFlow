@@ -19,7 +19,7 @@ const el = {
   uploadCard: $('#uploadCard'), dropzone: $('#dropzone'), fileInput: $('#fileInput'),
   dropHint: $('#dropHint'), quota: $('#quota'),
   erasePreset: $('#erasePreset'), eraseHint: $('#eraseHint'), modeRow: $('#modeRow'), resRow: $('#resRow'), resSelect: $('#resSelect'), verSelect: $('#verSelect'), batchZip: $('#batchZip'),
-  asrRow: $('#asrRow'), asrLang: $('#asrLang'), asrBurn: $('#asrBurn'), tcRow: $('#tcRow'), tcProfile: $('#tcProfile'),
+  tcRow: $('#tcRow'), tcProfile: $('#tcProfile'),
   tabbar: $('#tabbar'), navMain: $('#navMain'), assetFilters: $('#assetFilters'), assetGrid: $('#assetGrid'),
   assetEmpty: $('#assetEmpty'), assetTotal: $('#assetTotal'), assetSearch: $('#assetSearch'), assetBulk: $('#assetBulk'),
   assetSelAll: $('#assetSelAll'), assetSelNote: $('#assetSelNote'), assetBulkDelete: $('#assetBulkDelete'),
@@ -48,8 +48,8 @@ const state = {
   selected: new Set(),// 勾选的任务（批量开始/批量取消只针对它们）
   pollTimer: null,
   tickTimer: null,
-  tab: 'link',                       // link | erase | asr | enhance | transcode
-  tabBatch: { link: null, erase: null, asr: null, enhance: null, transcode: null },
+  tab: 'link',                       // link | erase | enhance | transcode
+  tabBatch: { link: null, erase: null, enhance: null, transcode: null },
   linkTasks: [],                      // 链接去水印创建的任务
 };
 
@@ -1566,12 +1566,11 @@ el.dropzone.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.fileInput.click(); }
 });
 /* ============================================================================
- * 工具标签：去水印 / 去字幕 / 加字幕 / 画质超清 / 视频压缩
- * 五个工具共用「输入卡片 + 批次结果」的纵向页面骨架。
+ * 工具标签：去水印 / 去字幕 / 画质超清 / 视频压缩
+ * 四个工具共用「输入卡片 + 批次结果」的纵向页面骨架。
  * ========================================================================== */
 function tabPayload() {
   if (state.tab === 'enhance') return { operation: 'enhance', resolution: el.resSelect?.value || '1080p', toolVersion: el.verSelect?.value || 'standard' };
-  if (state.tab === 'asr') return { operation: 'asr-subtitles', options: { language: el.asrLang?.value || 'auto', burn: el.asrBurn?.checked === true } };
   if (state.tab === 'transcode') return { operation: 'transcode', options: { profile: el.tcProfile?.value || '1080p' } };
   return { operation: 'erase-subtitle', erasePreset: el.erasePreset?.value || 'standard' };
 }
@@ -1579,7 +1578,6 @@ function tabPayload() {
 const TAB_META = {
   link: { title: '视频去水印', desc: '粘贴公网视频直链，直接调用云端处理，无需先上传到服务器；支持一次添加多条链接。' },
   erase: { title: '视频去字幕', desc: '上传视频，智能识别并擦除画面字幕；支持批量处理与原片、结果对比预览。' },
-  asr: { title: '视频加字幕', desc: '识别视频语音并生成带时间戳的 SRT 字幕，也可以直接烧录为带字幕的视频。' },
   enhance: { title: '画质超清', desc: '对视频进行去噪、清晰度增强与超分辨率处理，最高可输出 4K。' },
   transcode: { title: '视频压缩', desc: '将视频压缩为适合上传和分发的 MP4，可选择 1080P、720P 或 H.265。' },
 };
@@ -1597,7 +1595,6 @@ async function setTab(tab) {
   if (el.linkCard) el.linkCard.hidden = !isLink;
   if (el.modeRow) el.modeRow.hidden = tab !== 'erase';
   if (el.resRow) el.resRow.hidden = tab !== 'enhance';
-  if (el.asrRow) el.asrRow.hidden = tab !== 'asr';
   if (el.tcRow) el.tcRow.hidden = tab !== 'transcode';
   stopPolling();
   state.items = [];
@@ -2297,7 +2294,7 @@ async function runHomeCommand() {
     return;
   }
   const status = document.getElementById('generationStatus');
-  const ratio = document.getElementById('videoRatio')?.value || '16:9';
+  const ratio = document.getElementById('videoRatio')?.value || '9:16';
   const resolution = document.getElementById('videoResolution')?.value || '768p';
   const duration = Number(document.getElementById('videoDuration')?.value || 5);
   const resolutionOption = ratio === '1:1'
@@ -2385,7 +2382,7 @@ document.querySelectorAll('[data-gen-mode]').forEach((button) => {
 });
 
 function syncPreviewSpec() {
-  const ratio = document.getElementById('videoRatio')?.value || '16:9';
+  const ratio = document.getElementById('videoRatio')?.value || '9:16';
   const duration = document.getElementById('videoDuration')?.value || '5';
   const resolution = document.getElementById('videoResolution')?.value || '768p';
   const spec = document.getElementById('previewSpec');

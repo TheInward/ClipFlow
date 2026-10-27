@@ -93,8 +93,9 @@ const AUTODL_IMAGE_VIDEO_WORKFLOW = String(process.env.AUTODL_IMAGE_VIDEO_WORKFL
 const AUTODL_KEYFRAME_VIDEO_WORKFLOW = String(process.env.AUTODL_KEYFRAME_VIDEO_WORKFLOW || 'minimax_h3_lightx2v').trim();
 const AUTODL_READY = Boolean(AUTODL_API_TOKEN && AUTODL_VIDEO_WORKFLOW && AUTODL_IMAGE_VIDEO_WORKFLOW && AUTODL_KEYFRAME_VIDEO_WORKFLOW);
 const AUTODL_VIDEO_RESOLUTIONS = new Set([
-  '480p竖', '480p横', '768p竖', '768p横', '480p(1:1)', '768p(1:1)',
+  '480p竖', '768p竖',
 ]);
+const AUTODL_VIDEO_DURATIONS = new Set([5, 10, 15]);
 const VIDEO_GENERATION_MODES = new Set(['text', 'multi_image', 'keyframes']);
 const REFERENCE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.mp4', '.mov', '.m4v', '.webm', '.mp3', '.wav', '.m4a', '.flac']);
 const IMAGE_REFERENCE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
@@ -2324,12 +2325,12 @@ const ROUTES = {
     }
     if (Object.keys(parameters).length > 30) return sendError(res, 400, '工作流参数过多');
     if (parameters.resolution != null && !AUTODL_VIDEO_RESOLUTIONS.has(String(parameters.resolution))) {
-      return sendError(res, 400, '视频分辨率参数无效', { allowed: [...AUTODL_VIDEO_RESOLUTIONS] });
+      return sendError(res, 400, '当前视频生成仅支持 9:16 竖屏', { allowed: [...AUTODL_VIDEO_RESOLUTIONS] });
     }
     if (parameters.duration != null) {
       const duration = Number(parameters.duration);
-      if (!Number.isInteger(duration) || duration < 1 || duration > 15) {
-        return sendError(res, 400, '视频时长必须是 1–15 秒的整数');
+      if (!AUTODL_VIDEO_DURATIONS.has(duration)) {
+        return sendError(res, 400, '当前视频生成仅支持 5 秒、10 秒或 15 秒', { allowed: [...AUTODL_VIDEO_DURATIONS] });
       }
     }
     if (videoGenerationSubmissionLocks.has(user.id)) {

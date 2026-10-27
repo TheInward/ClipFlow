@@ -193,6 +193,11 @@ write_env() {
       echo "ADMIN_PASSWORD=${admin_password}" >> "$env_file"
       warn "旧环境缺少管理员配置，已创建 ${admin_phone} / ${admin_password}"
     fi
+    grep -q '^AUTODL_API_TOKEN=' "$env_file" || echo "AUTODL_API_TOKEN=${AUTODL_API_TOKEN:-}" >> "$env_file"
+    grep -q '^AUTODL_API_BASE=' "$env_file" || echo "AUTODL_API_BASE=${AUTODL_API_BASE:-https://autodl.art/api/v1/comfyui}" >> "$env_file"
+    grep -q '^AUTODL_VIDEO_WORKFLOW=' "$env_file" || echo "AUTODL_VIDEO_WORKFLOW=${AUTODL_VIDEO_WORKFLOW:-minimax_h3_lightx2v_no_pic}" >> "$env_file"
+    grep -q '^AUTODL_IMAGE_VIDEO_WORKFLOW=' "$env_file" || echo "AUTODL_IMAGE_VIDEO_WORKFLOW=${AUTODL_IMAGE_VIDEO_WORKFLOW:-minimax_h3_lightx2v_v5_15s}" >> "$env_file"
+    grep -q '^AUTODL_KEYFRAME_VIDEO_WORKFLOW=' "$env_file" || echo "AUTODL_KEYFRAME_VIDEO_WORKFLOW=${AUTODL_KEYFRAME_VIDEO_WORKFLOW:-minimax_h3_lightx2v}" >> "$env_file"
     return
   fi
   log "生成环境文件 ${env_file}"
@@ -214,6 +219,13 @@ ADMIN_PASSWORD=${admin_password}
 # PUBLIC_BASE_URL 必须是公网能匿名访问到本服务的地址，去字幕接口靠它拉取源文件
 AMK_API_KEY=${AMK_API_KEY:-}
 PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
+
+# AutoDL ComfyUI 视频生成
+AUTODL_API_TOKEN=${AUTODL_API_TOKEN:-}
+AUTODL_API_BASE=${AUTODL_API_BASE:-https://autodl.art/api/v1/comfyui}
+AUTODL_VIDEO_WORKFLOW=${AUTODL_VIDEO_WORKFLOW:-minimax_h3_lightx2v_no_pic}
+AUTODL_IMAGE_VIDEO_WORKFLOW=${AUTODL_IMAGE_VIDEO_WORKFLOW:-minimax_h3_lightx2v_v5_15s}
+AUTODL_KEYFRAME_VIDEO_WORKFLOW=${AUTODL_KEYFRAME_VIDEO_WORKFLOW:-minimax_h3_lightx2v}
 
 # 源文件与产物的存活时间（小时）
 UPLOAD_TTL_HOURS=12

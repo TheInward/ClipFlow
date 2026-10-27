@@ -56,6 +56,11 @@ tar --exclude='./data' --exclude='./node_modules' --exclude='./.git' \
 log "在服务器上执行安装（Node + systemd）"
 REMOTE_ENV="ADMIN_PHONE=$(printf '%q' "$ADMIN_PHONE") ADMIN_PASSWORD=$(printf '%q' "$ADMIN_PASSWORD") PORT=${PORT} APP_DIR=${APP_DIR} PUBLIC_BASE_URL=$(printf '%q' "$PUBLIC_BASE_URL")"
 [ -n "${AMK_API_KEY:-}" ] && REMOTE_ENV="${REMOTE_ENV} AMK_API_KEY=$(printf '%q' "$AMK_API_KEY")"
+[ -n "${AUTODL_API_TOKEN:-}" ] && REMOTE_ENV="${REMOTE_ENV} AUTODL_API_TOKEN=$(printf '%q' "$AUTODL_API_TOKEN")"
+[ -n "${AUTODL_API_BASE:-}" ] && REMOTE_ENV="${REMOTE_ENV} AUTODL_API_BASE=$(printf '%q' "$AUTODL_API_BASE")"
+[ -n "${AUTODL_VIDEO_WORKFLOW:-}" ] && REMOTE_ENV="${REMOTE_ENV} AUTODL_VIDEO_WORKFLOW=$(printf '%q' "$AUTODL_VIDEO_WORKFLOW")"
+[ -n "${AUTODL_IMAGE_VIDEO_WORKFLOW:-}" ] && REMOTE_ENV="${REMOTE_ENV} AUTODL_IMAGE_VIDEO_WORKFLOW=$(printf '%q' "$AUTODL_IMAGE_VIDEO_WORKFLOW")"
+[ -n "${AUTODL_KEYFRAME_VIDEO_WORKFLOW:-}" ] && REMOTE_ENV="${REMOTE_ENV} AUTODL_KEYFRAME_VIDEO_WORKFLOW=$(printf '%q' "$AUTODL_KEYFRAME_VIDEO_WORKFLOW")"
 "${SSH[@]}" "cd ${REMOTE_SRC} && chmod +x deploy/install.sh && ${REMOTE_ENV} ./deploy/install.sh" \
   || die "远端安装失败，可登录后查看：journalctl -u clipflow -n 50 --no-pager"
 

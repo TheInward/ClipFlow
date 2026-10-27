@@ -33,10 +33,19 @@ async function mockProbe(dir) {
 test('real HTTP routes: billing, ownership, queue cancellation, enhancement and sessions', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'clipflow-test-'));
   const upstreamTasks = new Map();
+  const videoWorkflowCalls = [];
   let serial = 0;
   const upstream = http.createServer(async (req, res) => {
     const json = (body) => { res.setHeader('Content-Type','application/json'); res.end(JSON.stringify(body)); };
     if (req.url.startsWith('/asset')) { res.setHeader('Content-Length','2048'); res.end(req.method === 'HEAD' ? undefined : Buffer.alloc(2048)); return; }
+    if (req.method === 'POST' && req.url.startsWith('/comfy/comfyui_workflow/')) {
+      let raw = ''; for await (const chunk of req) raw += chunk;
+      const workflow = decodeURIComponent(req.url.slice('/comfy/comfyui_workflow/'.length));
+      const input = JSON.parse(raw);
+      const taskId = `video_${videoWorkflowCalls.length + 1}`;
+      videoWorkflowCalls.push({ workflow, input, taskId });
+      return json({ code:'Success', data:{ task_id:taskId, status:'QUEUED', created_at:new Date().toISOString() }, msg:'' });
+    }
     if (req.method === 'POST' && req.url.startsWith('/tools/')) {
       let raw = ''; for await (const chunk of req) raw += chunk;
       const id = `remote_${++serial}`;
@@ -66,6 +75,9 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
   const childOptions = { cwd: path.resolve('.'), env: { ...process.env,
     DATA_DIR: dir, HOST:'127.0.0.1', PORT:String(port), AMK_API_KEY:'test-key',
     AMK_API_BASE:`http://127.0.0.1:${upstream.address().port}`, PUBLIC_BASE_URL:base,
+    AUTODL_API_TOKEN:'test-token', AUTODL_API_BASE:`http://127.0.0.1:${upstream.address().port}/comfy`,
+    AUTODL_VIDEO_WORKFLOW:'minimax_h3_lightx2v_no_pic', AUTODL_IMAGE_VIDEO_WORKFLOW:'minimax_h3_lightx2v_v5_15s',
+    AUTODL_KEYFRAME_VIDEO_WORKFLOW:'minimax_h3_lightx2v',
     AMK_POLL_MS:'1000', MAX_ACTIVE_TASKS:'1', DISK_MIN_FREE_BYTES:'0', DISK_RESERVE_BYTES:'0',
     FFPROBE_PATH:await mockProbe(dir), KEEP_ARTIFACT:'false', ADMIN_PHONE:'', ADMIN_PASSWORD:'',
   }, stdio:['ignore','pipe','pipe'] };
@@ -92,6 +104,10 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     const r=await api('/api/uploads',{user,method:'POST',raw:String(value),headers:{'X-File-Name':'test.mp4'}});
     assert.equal(r.status,200,JSON.stringify(r.data)); return r.data.file.id;
   };
+  const uploadReference = async(name, user='a') => {
+    const r=await api('/api/video-references',{user,method:'POST',raw:'image-bytes',headers:{'X-File-Name':name,'Content-Type':'image/jpeg'}});
+    assert.equal(r.status,201,JSON.stringify(r.data)); return r.data.reference;
+  };
   const batch = async(file, opts={}) => {
     const r=await api('/api/batches',{method:'POST',user:opts.user,body:{fileIds:[file],durations:{[file]:1},...opts}});
     assert.equal(r.status,202,JSON.stringify(r.data));return r.data;
@@ -107,6 +123,35 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     const maxAge = Number(/Max-Age=(\d+)/.exec(r.headers.get('set-cookie'))?.[1]);
     assert.ok(maxAge >= 3540 && maxAge <= 3600);
     assert.ok(Date.parse(r.data.expiresAt)>Date.now()+59*60000);
+  });
+  await t.test('video generation maps text, multi-image and keyframe modes to exact AutoDL workflows', async () => {
+    const config = await api('/api/config');
+    assert.deepEqual(config.data.videoGeneration.workflows, {
+      text:'minimax_h3_lightx2v_no_pic', multi_image:'minimax_h3_lightx2v_v5_15s', keyframes:'minimax_h3_lightx2v',
+    });
+    const text = await api('/api/video-generations',{user:'admin',method:'POST',body:{
+      mode:'text', workflow:'minimax_h3_lightx2v_no_pic', prompt:'text prompt', parameters:{duration:5,resolution:'768p横'}, referenceIds:[],
+    }});
+    assert.equal(text.status,202,JSON.stringify(text.data));
+    const a1=await uploadReference('a1.jpg'), a2=await uploadReference('a2.jpg');
+    const multi = await api('/api/video-generations',{user:'a',method:'POST',body:{
+      mode:'multi_image', workflow:'minimax_h3_lightx2v_v5_15s', prompt:'multi prompt', parameters:{duration:10,resolution:'768p竖'}, referenceIds:[a1.id,a2.id],
+    }});
+    assert.equal(multi.status,202,JSON.stringify(multi.data));
+    const b1=await uploadReference('b1.jpg','b'), b2=await uploadReference('b2.jpg','b');
+    const frames = await api('/api/video-generations',{user:'b',method:'POST',body:{
+      mode:'keyframes', workflow:'minimax_h3_lightx2v', prompt:'transition prompt', parameters:{duration:5,resolution:'480p横'}, referenceIds:[b1.id,b2.id],
+    }});
+    assert.equal(frames.status,202,JSON.stringify(frames.data));
+    assert.equal(videoWorkflowCalls[0].workflow,'minimax_h3_lightx2v_no_pic');
+    assert.equal(videoWorkflowCalls[0].input.ref_image_0,undefined);
+    assert.equal(videoWorkflowCalls[1].workflow,'minimax_h3_lightx2v_v5_15s');
+    assert.match(videoWorkflowCalls[1].input.ref_image_0,/\/r\/ref_/);
+    assert.match(videoWorkflowCalls[1].input.ref_image_1,/\/r\/ref_/);
+    assert.equal(videoWorkflowCalls[2].workflow,'minimax_h3_lightx2v');
+    assert.match(videoWorkflowCalls[2].input.first_frame,/\/r\/ref_/);
+    assert.match(videoWorkflowCalls[2].input.last_frame,/\/r\/ref_/);
+    assert.equal(videoWorkflowCalls[2].input.ref_image_0,undefined);
   });
   const file=await upload(3.2);
   await t.test('legacy process route requires credits and rejects invalid media',async()=>{

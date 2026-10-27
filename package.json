@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "内部全自动视频去水印/去字幕网站：Token 登录 / MD5 秒传 / 云端擦除 / 12 小时过期 / 预览与下载",
+  "description": "一站式 AI 视频创作平台：视频生成、参考素材、字幕处理、画质增强、视频压缩与资产管理",
   "scripts": {
     "start": "node server.mjs",
     "dev": "node --watch server.mjs",

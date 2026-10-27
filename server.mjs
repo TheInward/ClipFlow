@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * ClipFlow 服务端（零依赖，仅 Node.js 内置模块）
- * 全自动视频去字幕站点：上传 → 云端/本地去字幕 → 预览与下载
+ * 一站式 AI 视频创作平台：视频生成、智能处理、资产预览与下载
  *
  * 职责：
  *   1. 手机号/密码登录（HttpOnly 会话 Cookie，持续操作续期，闲置 1 小时失效）
@@ -40,6 +40,26 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// 本地开发读取 Git 忽略的密钥文件；线上 systemd 仍通过 EnvironmentFile 注入。
+// 已存在的进程环境变量优先，避免文件覆盖部署配置。
+function loadLocalEnv() {
+  const file = path.join(__dirname, 'clipflow.env');
+  let source;
+  try { source = fs.readFileSync(file, 'utf8'); } catch { return; }
+  for (const raw of source.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const at = line.indexOf('=');
+    if (at <= 0) continue;
+    const key = line.slice(0, at).trim();
+    let value = line.slice(at + 1).trim();
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(key) || process.env[key] !== undefined) continue;
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+    process.env[key] = value;
+  }
+}
+loadLocalEnv();
+
 /**
  * 构建号：部署时由 install.sh 写入 BUILD 文件（精确到分钟），例如 build202610141950。
  * 优先环境变量 BUILD_ID，其次 BUILD 文件，本地开发没有该文件时退回本次启动时间。
@@ -58,12 +78,26 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const OUTPUT_DIR = path.join(DATA_DIR, 'outputs');
+const REFERENCE_DIR = path.join(DATA_DIR, 'references');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '0.0.0.0';
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 100 * 1024 ** 2); // 单文件上限 100MB
+const REFERENCE_MAX_UPLOAD_BYTES = Number(process.env.REFERENCE_MAX_UPLOAD_BYTES || 100 * 1024 ** 2);
 const PUBLIC_BASE = (process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
+const AUTODL_API_BASE = String(process.env.AUTODL_API_BASE || 'https://autodl.art/api/v1/comfyui').replace(/\/+$/, '');
+const AUTODL_API_TOKEN = String(process.env.AUTODL_API_TOKEN || '').trim();
+const AUTODL_VIDEO_WORKFLOW = String(process.env.AUTODL_VIDEO_WORKFLOW || 'minimax_h3_lightx2v_no_pic').trim();
+const AUTODL_IMAGE_VIDEO_WORKFLOW = String(process.env.AUTODL_IMAGE_VIDEO_WORKFLOW || 'minimax_h3_lightx2v_v5_15s').trim();
+const AUTODL_KEYFRAME_VIDEO_WORKFLOW = String(process.env.AUTODL_KEYFRAME_VIDEO_WORKFLOW || 'minimax_h3_lightx2v').trim();
+const AUTODL_READY = Boolean(AUTODL_API_TOKEN && AUTODL_VIDEO_WORKFLOW && AUTODL_IMAGE_VIDEO_WORKFLOW && AUTODL_KEYFRAME_VIDEO_WORKFLOW);
+const AUTODL_VIDEO_RESOLUTIONS = new Set([
+  '480p竖', '480p横', '768p竖', '768p横', '480p(1:1)', '768p(1:1)',
+]);
+const VIDEO_GENERATION_MODES = new Set(['text', 'multi_image', 'keyframes']);
+const REFERENCE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.mp4', '.mov', '.m4v', '.webm', '.mp3', '.wav', '.m4a', '.flac']);
+const IMAGE_REFERENCE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 /**
  * 批量任务编排：把"跑一个任务"拆成两段，各用各的名额
  *   · 提交段（探测源文件 + 调接口提交）：很轻，可以同时提交很多 → SUBMIT_CONCURRENCY
@@ -285,6 +319,10 @@ const MIME = {
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.json': 'application/json; charset=utf-8',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
   '.mp4': 'video/mp4',
   '.mov': 'video/quicktime',
   '.webm': 'video/webm',
@@ -297,11 +335,15 @@ const MIME = {
   '.mpeg': 'video/mpeg',
   '.mpg': 'video/mpeg',
   '.m4v': 'video/x-m4v',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.flac': 'audio/flac',
 };
 
 // ---------------------------------------------------------------- 存储层
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+fs.mkdirSync(REFERENCE_DIR, { recursive: true });
 
 const db = { files: {}, tasks: {}, md5Index: {}, sessions: {} };
 try {
@@ -318,6 +360,8 @@ db.users ||= {};
 db.creditLedger ||= [];
 db.redemptionCodes ||= {};
 db.abuseEvents ||= [];
+db.videoGenerations ||= {};
+db.references ||= {};
 // MD5 → fileId 索引（去重的唯一依据，文件名即 MD5）；旧记录没有 md5 字段，顺手补建索引
 // MD5 索引必须按账号隔离。物理 blob 仍可复用，但每个用户拥有独立的文件记录、
 // 文件名、过期时间和删除权限，避免跨账号秒传泄漏元数据或互相删除源文件。
@@ -399,6 +443,7 @@ const LAN_IP = lanIp();
 /** 内网（或公网）可达地址；设置 PUBLIC_BASE_URL 可接入域名 / 反向代理 */
 const baseUrl = () => PUBLIC_BASE || `http://${LAN_IP}:${PORT}`;
 const publicFileUrl = (fileId) => `${baseUrl()}/f/${fileId}`;
+const publicReferenceUrl = (referenceId) => `${baseUrl()}/r/${referenceId}`;
 const publicDownloadUrl = (taskId) => `${baseUrl()}/api/download/${taskId}`;
 const publicPosterUrl = (taskId) => `${baseUrl()}/api/artifacts/${taskId}/poster.svg`;
 
@@ -563,6 +608,7 @@ async function sweepExpired(trigger = 'timer') {
   sweeping = true;
   const now = Date.now();
   const removed = [];
+  const removedReferences = [];
   const cleanedTasks = [];
   try {
     for (const f of Object.values(db.files)) {
@@ -587,6 +633,14 @@ async function sweepExpired(trigger = 'timer') {
       }
       removed.push({ id: f.id, md5: f.md5, name: f.name, size: f.size });
       console.log(`[ttl] 过期清理：${f.name} (${f.id}) 文件与 md5=${f.md5} 索引已删除`);
+    }
+
+    for (const reference of Object.values(db.references)) {
+      if ((Date.parse(reference.expiresAt || 0) || 0) > now) continue;
+      delete db.references[reference.id];
+      await fsp.rm(path.join(DATA_DIR, reference.storedPath), { force: true });
+      removedReferences.push(reference.id);
+      console.log(`[ttl] 参考素材过期清理：${reference.name} (${reference.id})`);
     }
 
     // 孤儿临时文件（上传中断 / 进程被杀留下的 .incoming-*）
@@ -650,18 +704,18 @@ async function sweepExpired(trigger = 'timer') {
       if (!alive && created && created < keepAfter) { delete db.batches[bid]; prunedBatches += 1; }
     }
 
-    if (removed.length || cleanedTasks.length || orphans || orphanDirs || prunedTasks) saveDb();
+    if (removed.length || removedReferences.length || cleanedTasks.length || orphans || orphanDirs || prunedTasks) saveDb();
     const dg = diskGuard();
     if (!dg.ok) {
       console.warn(`[disk] 剩余 ${formatBytes(dg.free)}，低于保护线 ${formatBytes(dg.minFree)}：已暂停接收新任务（上传/建批次/开始任务）`);
     }
-    if (removed.length || cleanedTasks.length || orphans || orphanDirs || prunedTasks) {
+    if (removed.length || removedReferences.length || cleanedTasks.length || orphans || orphanDirs || prunedTasks) {
       console.log(
-        `[ttl] 本轮清理 ${removed.length} 个源文件、${cleanedTasks.length} 个派生任务、` +
+        `[ttl] 本轮清理 ${removed.length} 个源文件、${removedReferences.length} 个参考素材、${cleanedTasks.length} 个派生任务、` +
           `${orphans} 个临时文件、${orphanDirs} 个孤儿产物目录、${prunedTasks} 条历史任务记录、${prunedBatches} 个历史批次`,
       );
     }
-    return { removed: removed.length, cleanedTasks: cleanedTasks.length, orphans, orphanDirs, prunedTasks, files: removed };
+    return { removed: removed.length, removedReferences: removedReferences.length, cleanedTasks: cleanedTasks.length, orphans, orphanDirs, prunedTasks, files: removed };
   } finally {
     sweeping = false;
   }
@@ -966,6 +1020,76 @@ async function handleUpload(req, res) {
       ` md5=${digest}${declaredMd5 ? '（与客户端一致）' : ''} -> uploads/${digest}${ext}`,
   );
   sendJson(res, 200, { file: serializeFile(file), deduped: false, md5: digest });
+}
+
+function serializeReference(reference) {
+  return {
+    id: reference.id,
+    name: reference.name,
+    ext: reference.ext,
+    mime: reference.mime,
+    size: reference.size,
+    kind: reference.kind,
+    url: publicReferenceUrl(reference.id),
+    localUrl: `/r/${reference.id}`,
+    createdAt: reference.createdAt,
+    expiresAt: reference.expiresAt,
+  };
+}
+
+async function handleReferenceUpload(req, res) {
+  const diskCheck = diskGuard();
+  if (!diskCheck.ok) return sendError(res, 507, diskLowMessage(diskCheck.free));
+  const rawHeader = String(req.headers['x-file-name'] || 'reference.bin');
+  let decodedName = rawHeader;
+  try { decodedName = decodeURIComponent(rawHeader); } catch { decodedName = rawHeader; }
+  const name = sanitizeName(decodedName);
+  const ext = path.extname(name).toLowerCase();
+  if (!REFERENCE_EXT.has(ext)) {
+    return sendError(res, 415, `不支持的参考文件类型 ${ext || '(无扩展名)'}`, { allowed: [...REFERENCE_EXT] });
+  }
+  const referenceId = id('ref');
+  const storedPath = path.join(REFERENCE_DIR, `${referenceId}${ext}`);
+  let received = 0;
+  const guard = async function* (source) {
+    for await (const chunk of source) {
+      received += chunk.length;
+      if (received > REFERENCE_MAX_UPLOAD_BYTES) {
+        throw Object.assign(new Error('参考文件超过大小限制'), { status: 413 });
+      }
+      yield chunk;
+    }
+  };
+  try {
+    await pipeline(req, guard, fs.createWriteStream(storedPath, { flags: 'wx' }));
+  } catch (err) {
+    await fsp.rm(storedPath, { force: true });
+    if (err.status) return sendError(res, err.status, err.message, { maxBytes: REFERENCE_MAX_UPLOAD_BYTES });
+    if (err.code === 'EEXIST') return sendError(res, 409, '参考文件 ID 冲突，请重试');
+    return;
+  }
+  if (!received) {
+    await fsp.rm(storedPath, { force: true });
+    return sendError(res, 400, '上传内容为空');
+  }
+  const kind = IMAGE_REFERENCE_EXT.has(ext) ? 'image' : ['.mp4', '.mov', '.m4v', '.webm'].includes(ext) ? 'video' : 'audio';
+  const now = new Date();
+  const reference = {
+    id: referenceId,
+    userId: currentUser(req)?.id || null,
+    name,
+    ext,
+    mime: MIME[ext] || String(req.headers['content-type'] || 'application/octet-stream'),
+    kind,
+    size: received,
+    storedPath: path.relative(DATA_DIR, storedPath),
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + UPLOAD_TTL_MS).toISOString(),
+  };
+  db.references[referenceId] = reference;
+  saveDb();
+  console.log(`[reference] ${referenceId} ${kind} ${name} ${formatBytes(received)}`);
+  sendJson(res, 201, { reference: serializeReference(reference) });
 }
 
 // ---------------------------------------------------------------- 任务队列
@@ -1975,10 +2099,130 @@ function createUrlTask(urlInfo, user, eff) {
   return task;
 }
 
+/**
+ * AutoDL ComfyUI 服务端代理。
+ * Token 只存在于 Node 进程环境变量中，绝不下发给浏览器或写入任务数据。
+ */
+async function autodlRequest(pathname, { method = 'GET', body } = {}) {
+  if (!AUTODL_READY) throw Object.assign(new Error('视频生成服务尚未配置'), { status: 503 });
+  const response = await fetch(`${AUTODL_API_BASE}${pathname}`, {
+    method,
+    signal: AbortSignal.timeout(30_000),
+    headers: {
+      Authorization: AUTODL_API_TOKEN,
+      'Content-Type': 'application/json',
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const upstreamMessage = String(data?.error?.message || data?.message || data?.msg || `AutoDL HTTP ${response.status}`);
+    let message = upstreamMessage;
+    let errorCode = 'PROVIDER_REQUEST_FAILED';
+    let retryable = response.status >= 500;
+    if (/insufficient account balance/i.test(upstreamMessage)) {
+      message = '云端视频生成服务余额不足，任务未创建。请联系管理员充值服务商账户后重试。';
+      errorCode = 'PROVIDER_BALANCE_INSUFFICIENT';
+      retryable = false;
+    } else if (response.status === 401 || /unauthori[sz]ed|invalid.*token|token.*invalid/i.test(upstreamMessage)) {
+      message = '云端视频生成服务鉴权失败，任务未创建。请联系管理员检查接口 Token。';
+      errorCode = 'PROVIDER_AUTH_FAILED';
+      retryable = false;
+    } else if (response.status === 429 || /rate limit|too many requests/i.test(upstreamMessage)) {
+      message = '云端视频生成服务当前请求过多，任务未创建。请稍后再试。';
+      errorCode = 'PROVIDER_RATE_LIMITED';
+      retryable = true;
+    }
+    throw Object.assign(new Error(message), {
+      status: response.status === 401 ? 502 : response.status,
+      errorCode,
+      stage: method === 'POST' ? 'submission' : 'polling',
+      retryable,
+    });
+  }
+  return data;
+}
+
+function safeWorkflowId(input) {
+  const value = String(input || AUTODL_VIDEO_WORKFLOW).trim();
+  const allowed = new Set([AUTODL_VIDEO_WORKFLOW, AUTODL_IMAGE_VIDEO_WORKFLOW, AUTODL_KEYFRAME_VIDEO_WORKFLOW]);
+  if (!/^[A-Za-z0-9_-]{1,120}$/.test(value) || !allowed.has(value)) {
+    throw Object.assign(new Error('不支持的视频工作流'), { status: 400 });
+  }
+  return value;
+}
+
+const VIDEO_GENERATION_ACTIVE = new Set(['SUBMITTING', 'QUEUED', 'RUNNING']);
+const VIDEO_GENERATION_TERMINAL = new Set(['SUCCESS', 'FAILED', 'ERROR', 'CANCELED', 'CANCELLED']);
+const videoGenerationSubmissionLocks = new Set();
+
+function normalizeVideoGenerationStatus(value) {
+  const status = String(value || 'QUEUED').toUpperCase();
+  if (status === 'COMPLETED' || status === 'SUCCEEDED') return 'SUCCESS';
+  if (status === 'FAILURE') return 'FAILED';
+  if (status === 'PROCESSING') return 'RUNNING';
+  return status;
+}
+
+function videoGenerationForUser(userId, activeOnly = false) {
+  return Object.values(db.videoGenerations)
+    .filter((item) => item.userId === userId && (!activeOnly || VIDEO_GENERATION_ACTIVE.has(item.status)))
+    .sort((a, b) => Date.parse(b.updatedAt || b.createdAt || 0) - Date.parse(a.updatedAt || a.createdAt || 0))[0] || null;
+}
+
+function serializeVideoGeneration(item) {
+  if (!item) return null;
+  const elapsed = Math.max(0, Math.floor((Date.now() - Date.parse(item.createdAt || Date.now())) / 1000));
+  let estimatedProgress = 0;
+  if (item.status === 'QUEUED' || item.status === 'SUBMITTING') estimatedProgress = Math.min(18, 5 + Math.floor(elapsed / 8));
+  else if (item.status === 'RUNNING') estimatedProgress = Math.min(94, 22 + Math.floor(elapsed / 3));
+  else if (item.status === 'SUCCESS') estimatedProgress = 100;
+  else if (VIDEO_GENERATION_TERMINAL.has(item.status)) estimatedProgress = null;
+  return {
+    taskId: item.taskId,
+    status: item.status,
+    prompt: item.prompt,
+    workflow: item.workflow,
+    mode: item.mode || (item.referenceIds?.length ? 'multi_image' : 'text'),
+    parameters: item.parameters,
+    createdAt: item.createdAt,
+    startedAt: item.startedAt || null,
+    duration: item.duration ?? null,
+    results: Array.isArray(item.results) ? item.results : [],
+    error: item.error || null,
+    errorCode: item.errorCode || null,
+    failureStage: item.failureStage || null,
+    estimatedProgress,
+  };
+}
+
+async function refreshVideoGeneration(item) {
+  if (!item || !item.taskId || VIDEO_GENERATION_TERMINAL.has(item.status)) return item;
+  const upstream = await autodlRequest(`/comfyui_workflow/result/${encodeURIComponent(item.taskId)}`);
+  if (upstream?.code !== 'Success' || !upstream?.data) {
+    throw Object.assign(new Error(upstream?.msg || '查询生成任务失败'), { status: 502 });
+  }
+  const data = upstream.data;
+  const before = JSON.stringify([item.status, item.duration, item.startedAt, item.results]);
+  item.status = normalizeVideoGenerationStatus(data.status || item.status);
+  item.duration = data.duration ?? item.duration ?? null;
+  item.startedAt = data.started_at || item.startedAt || null;
+  item.results = Array.isArray(data.results) ? data.results : [];
+  if (VIDEO_GENERATION_TERMINAL.has(item.status) && item.status !== 'SUCCESS') {
+    const failure = String(data?.error?.message || data?.error_message || data?.message || data?.msg || data?.failure_reason || data?.reason || '').trim();
+    item.error = failure || item.error || '云端任务已终止，但接口没有返回具体原因。';
+    item.errorCode = item.errorCode || 'PROVIDER_TASK_FAILED';
+    item.failureStage = 'generation';
+  }
+  item.updatedAt = new Date().toISOString();
+  if (before !== JSON.stringify([item.status, item.duration, item.startedAt, item.results])) saveDb();
+  return item;
+}
+
 const ROUTES = {
   'GET /api/config': async (req, res) => {
     sendJson(res, 200, {
-      service: 'ClipFlow',
+      service: 'ClipFlow AI',
       baseUrl: baseUrl(),
       lanIp: LAN_IP,
       port: PORT,
@@ -2004,10 +2248,143 @@ const ROUTES = {
       probeReady: await probeAvailable(),
       eraseReady: eraseApi.ready,
       eraseMissing: eraseApi.missing.map((m) => (m === 'AMK_API_KEY' ? '去字幕接口密钥' : '公网访问入口')),
+      videoGeneration: {
+        ready: AUTODL_READY,
+        provider: 'AutoDL ComfyUI',
+        workflow: AUTODL_VIDEO_WORKFLOW,
+        imageWorkflow: AUTODL_IMAGE_VIDEO_WORKFLOW,
+        keyframeWorkflow: AUTODL_KEYFRAME_VIDEO_WORKFLOW,
+        workflows: {
+          text: AUTODL_VIDEO_WORKFLOW,
+          multi_image: AUTODL_IMAGE_VIDEO_WORKFLOW,
+          keyframes: AUTODL_KEYFRAME_VIDEO_WORKFLOW,
+        },
+        referenceUpload: '/api/video-references',
+        referenceTtlHours: UPLOAD_TTL_MS / 3600000,
+      },
       dedupe: { key: 'md5', storage: 'content-addressed', precheck: '/api/uploads/precheck' },
       stages: STAGES.map(({ key, label, weight }) => ({ key, label, weight })),
       operations: Object.values(OPERATIONS).map(({ id: opId, label, desc, accent }) => ({ id: opId, label, desc, accent })),
     });
+  },
+
+  'POST /api/video-generations': async (req, res) => {
+    if (!AUTODL_READY) return sendError(res, 503, '视频生成服务尚未配置');
+    const user = currentUser(req);
+    let active = videoGenerationForUser(user.id, true);
+    if (active) {
+      try { active = await refreshVideoGeneration(active); } catch { /* 保守锁定，避免重复计费 */ }
+      if (VIDEO_GENERATION_ACTIVE.has(active.status)) {
+        return sendError(res, 409, '当前视频仍在生成，请等待任务完成后再提交', { generation: serializeVideoGeneration(active) });
+      }
+    }
+    if (videoGenerationSubmissionLocks.has(user.id)) {
+      return sendError(res, 409, '当前视频正在提交，请勿重复点击');
+    }
+    const body = await readJsonBody(req);
+    const prompt = String(body.prompt || '').trim();
+    if (!prompt) return sendError(res, 400, '请输入视频描述');
+    if (prompt.length > 1000) return sendError(res, 400, '视频描述不能超过 1000 字');
+    const mode = String(body.mode || '').trim();
+    if (!VIDEO_GENERATION_MODES.has(mode)) return sendError(res, 400, '请选择有效的生成方式');
+    const referenceIds = Array.isArray(body.referenceIds) ? [...new Set(body.referenceIds.map(String))] : [];
+    if (referenceIds.length > 9) return sendError(res, 400, '多图生视频最多支持 9 张参考图片');
+    const references = referenceIds.map((referenceId) => db.references[referenceId]);
+    if (references.some((reference) => !reference || reference.userId !== user.id)) {
+      return sendError(res, 404, '参考素材不存在或不属于当前账号');
+    }
+    if (references.some((reference) => (Date.parse(reference.expiresAt || 0) || 0) <= Date.now())) {
+      return sendError(res, 410, '参考素材已过期，请重新上传');
+    }
+    if (references.some((reference) => reference.kind !== 'image' || !IMAGE_REFERENCE_EXT.has(reference.ext))) {
+      return sendError(res, 415, '视频生成参考文件仅支持 JPG、PNG、WebP 图片');
+    }
+    if (mode === 'text' && references.length) return sendError(res, 400, '文生视频不接受参考图片');
+    if (mode === 'multi_image' && (references.length < 1 || references.length > 9)) {
+      return sendError(res, 400, '多图生视频需要 1–9 张参考图片');
+    }
+    if (mode === 'keyframes' && references.length !== 2) {
+      return sendError(res, 400, '首尾帧生视频需要正好 2 张图片：第一张为首帧，第二张为尾帧');
+    }
+    const expectedWorkflow = mode === 'text'
+      ? AUTODL_VIDEO_WORKFLOW
+      : mode === 'multi_image' ? AUTODL_IMAGE_VIDEO_WORKFLOW : AUTODL_KEYFRAME_VIDEO_WORKFLOW;
+    const workflow = safeWorkflowId(body.workflow || expectedWorkflow);
+    if (workflow !== expectedWorkflow) return sendError(res, 400, '生成方式与视频工作流不匹配');
+    const parameters = body.parameters && typeof body.parameters === 'object' && !Array.isArray(body.parameters)
+      ? { ...body.parameters } : {};
+    for (const key of Object.keys(parameters)) {
+      if (/^ref_(?:image|audio|video)_\d+$/.test(key) || key === 'first_frame' || key === 'last_frame') delete parameters[key];
+    }
+    if (mode === 'multi_image') {
+      references.forEach((reference, index) => { parameters[`ref_image_${index}`] = publicReferenceUrl(reference.id); });
+    } else if (mode === 'keyframes') {
+      parameters.first_frame = publicReferenceUrl(references[0].id);
+      parameters.last_frame = publicReferenceUrl(references[1].id);
+    }
+    if (Object.keys(parameters).length > 30) return sendError(res, 400, '工作流参数过多');
+    if (parameters.resolution != null && !AUTODL_VIDEO_RESOLUTIONS.has(String(parameters.resolution))) {
+      return sendError(res, 400, '视频分辨率参数无效', { allowed: [...AUTODL_VIDEO_RESOLUTIONS] });
+    }
+    if (parameters.duration != null) {
+      const duration = Number(parameters.duration);
+      if (!Number.isInteger(duration) || duration < 1 || duration > 15) {
+        return sendError(res, 400, '视频时长必须是 1–15 秒的整数');
+      }
+    }
+    if (videoGenerationSubmissionLocks.has(user.id)) {
+      return sendError(res, 409, '当前视频正在提交，请勿重复点击');
+    }
+    videoGenerationSubmissionLocks.add(user.id);
+    let upstream;
+    try {
+      upstream = await autodlRequest(`/comfyui_workflow/${encodeURIComponent(workflow)}`, {
+        method: 'POST',
+        body: { ...parameters, prompt },
+      });
+    } finally {
+      videoGenerationSubmissionLocks.delete(user.id);
+    }
+    if (upstream?.code !== 'Success' || !upstream?.data?.task_id) {
+      return sendError(res, 502, upstream?.msg || 'AutoDL 未返回任务 ID');
+    }
+    const record = {
+      taskId: upstream.data.task_id,
+      userId: user.id,
+      status: normalizeVideoGenerationStatus(upstream.data.status || 'QUEUED'),
+      prompt,
+      workflow,
+      mode,
+      parameters,
+      referenceIds,
+      createdAt: upstream.data.created_at || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      duration: null,
+      results: [],
+    };
+    db.videoGenerations[record.taskId] = record;
+    saveDb();
+    sendJson(res, 202, {
+      ...serializeVideoGeneration(record),
+    });
+  },
+
+  'GET /api/video-generations/current': async (req, res) => {
+    const user = currentUser(req);
+    let generation = videoGenerationForUser(user.id, true) || videoGenerationForUser(user.id, false);
+    if (generation && VIDEO_GENERATION_ACTIVE.has(generation.status)) {
+      try { await refreshVideoGeneration(generation); } catch { /* 前端继续轮询原状态 */ }
+    }
+    sendJson(res, 200, { generation: serializeVideoGeneration(generation) });
+  },
+
+  'GET /api/video-generations/:taskId': async (req, res, { params }) => {
+    const taskId = String(params.taskId || '').trim();
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(taskId)) return sendError(res, 400, '任务 ID 无效');
+    const generation = db.videoGenerations[taskId];
+    if (!generation || generation.userId !== currentUser(req).id) return sendError(res, 404, '生成任务不存在');
+    await refreshVideoGeneration(generation);
+    sendJson(res, 200, serializeVideoGeneration(generation));
   },
 
   /* ---------------- 鉴权（无需登录即可访问的两个端点） ---------------- */
@@ -2262,6 +2639,7 @@ const ROUTES = {
   },
 
   'POST /api/uploads': handleUpload,
+  'POST /api/video-references': handleReferenceUpload,
 
   /** 秒传预检：先问「这个 MD5 你有没有」，有就不传了 */
   'POST /api/uploads/precheck': handlePrecheck,
@@ -2970,6 +3348,19 @@ batch.items.splice(idx, 1);
       downloadName: asDownload ? file.name : undefined,
     });
   },
+
+  /** 视频生成参考素材能力 URL：随机 ID，不暴露原始文件名或账号信息。 */
+  'GET /r/:id': async (req, res, { params }) => {
+    const reference = db.references[params.id];
+    if (!reference) return sendError(res, 404, '参考素材不存在或已过期');
+    if ((Date.parse(reference.expiresAt || 0) || 0) <= Date.now()) {
+      return sendError(res, 410, '参考素材已过期，请重新上传');
+    }
+    serveFile(req, res, path.join(DATA_DIR, reference.storedPath), {
+      mime: reference.mime || MIME[reference.ext] || 'application/octet-stream',
+      cache: 'private, max-age=300',
+    });
+  },
 };
 
 const STATIC_ROUTES = {
@@ -3050,7 +3441,9 @@ const server = http.createServer(async (req, res) => {
     // 供云端去字幕服务匿名拉取源文件；/f/<md5> 可被推算，因此必须登录。
     // 允许 GET 与 HEAD：云端/CDN 常常先用 HEAD 探测可达性，只放行 GET 会把它们挡在 401 外
     const capabilityUrl =
-      (req.method === 'GET' || req.method === 'HEAD') && /^\/f\/vf_[A-Za-z0-9_-]+$/.test(url.pathname);
+      (req.method === 'GET' || req.method === 'HEAD') && (
+        /^\/f\/vf_[A-Za-z0-9_-]+$/.test(url.pathname) || /^\/r\/ref_[A-Za-z0-9_-]+$/.test(url.pathname)
+      );
     const authless = PUBLIC_ROUTES.has(`${req.method} ${url.pathname}`) || capabilityUrl;
 
     // 限流：全局并发 + 每用户 + 每 IP（白名单/管理员豁免）
@@ -3110,7 +3503,12 @@ const server = http.createServer(async (req, res) => {
     await route.handler(req, res, { params: route.params, url });
   } catch (err) {
     console.error('[request]', err.message);
-    if (!res.headersSent) sendError(res, err instanceof URIError || err.code === 'ERR_INVALID_URL' ? 400 : (err.status || 500), err.status ? err.message : '请求无效或服务暂时不可用');
+    if (!res.headersSent) sendError(
+      res,
+      err instanceof URIError || err.code === 'ERR_INVALID_URL' ? 400 : (err.status || 500),
+      err.status ? err.message : '请求无效或服务暂时不可用',
+      err.errorCode ? { errorCode: err.errorCode, stage: err.stage || null, retryable: err.retryable === true } : {},
+    );
     else res.destroy();
   }
 });
@@ -3144,7 +3542,7 @@ server.listen(PORT, HOST, async () => {
     return { removed: 0 };
   });
   pruneSessions();
-  console.log(`\n  ClipFlow · 全自动视频去字幕`);
+  console.log(`\n  ClipFlow AI · 一站式 AI 视频创作平台`);
   console.log(`  本机       http://127.0.0.1:${PORT}`);
   console.log(`  外部       ${baseUrl()}   (能力 URL ${baseUrl()}/f/vf_<id>)`);
   console.log(`  数据       ${DATA_DIR}`);
@@ -3155,6 +3553,7 @@ server.listen(PORT, HOST, async () => {
       ? `             密钥与公网入口均已配置，可以提交任务`
       : `             ⚠ 未配置完成，缺少：${eraseApi.missing.join('、')}（提交任务会被拒绝）`,
   );
+  console.log(`  视频生成   ${AUTODL_READY ? `AutoDL 已配置 · 工作流 ${AUTODL_VIDEO_WORKFLOW}` : '⚠ 未配置 AUTODL_API_TOKEN'}`);
   console.log(`  过期策略   源文件 ${UPLOAD_TTL_MS / 3600000} 小时后删除（含 MD5 索引），每 ${SWEEP_INTERVAL_MS / 1000}s 扫描一次`);
   if (swept.removed) console.log(`             启动时清理了 ${swept.removed} 个过期文件`);
   console.log(`  并发       同时在场 ${MAX_ACTIVE_TASKS} · 提交 ${SUBMIT_CONCURRENCY} · 回传 ${FETCH_CONCURRENCY}`);

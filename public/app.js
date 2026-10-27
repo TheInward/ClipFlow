@@ -1,5 +1,5 @@
 /* ============================================================================
- * ClipFlow 批量版前端
+ * ClipFlow AI 创作平台前端
  *   ① 选择/拖入多个视频（≤ 上限），逐个 MD5 → 秒传预检 → 上传
  *   ② 上传齐了自动建批次（服务端按内容去重，内容相同的行共享同一个任务）
  *   ③ 轮询 GET /api/batches/:id（一次拿整批），渲染列表与汇总
@@ -12,7 +12,7 @@ const $ = (sel) => document.querySelector(sel);
 const el = {
   authGate: $('#authGate'), authForm: $('#authForm'), phoneInput: $('#phoneInput'), passwordInput: $('#passwordInput'), registerBtn: $('#registerBtn'), switchMode: $('#switchMode'), confirmField: $('#confirmField'), confirmInput: $('#confirmInput'), captchaField: $('#captchaField'), captchaQuestion: $('#captchaQuestion'), captchaInput: $('#captchaInput'),
   loginBtn: $('#loginBtn'), authError: $('#authError'), authSessionEnd: $('#authSessionEnd'),
-  appShell: $('#appShell'), sessionLeft: $('#sessionLeft'), logoutBtn: $('#logoutBtn'), buildTag: $('#buildTag'),
+  appShell: $('#appShell'), sessionLeft: $('#sessionLeft'), logoutBtn: $('#logoutBtn'), settingsBtn: $('#settingsBtn'), settingsMenu: $('#settingsMenu'), creditsBadge: $('#creditsBadge'), buildTag: $('#buildTag'),
   adminBtn: $('#adminBtn'), adminMask: $('#adminMask'), adminClose: $('#adminClose'),
   adminCount: $('#adminCount'), adminCredits: $('#adminCredits'), adminGen: $('#adminGen'),
   adminCodes: $('#adminCodes'), adminCopy: $('#adminCopy'), adminCopyRow: $('#adminCopyRow'), adminHint: $('#adminHint'),
@@ -20,8 +20,6 @@ const el = {
   dropHint: $('#dropHint'), quota: $('#quota'),
   erasePreset: $('#erasePreset'), eraseHint: $('#eraseHint'), modeRow: $('#modeRow'), resRow: $('#resRow'), resSelect: $('#resSelect'), verSelect: $('#verSelect'), batchZip: $('#batchZip'),
   asrRow: $('#asrRow'), asrLang: $('#asrLang'), asrBurn: $('#asrBurn'), tcRow: $('#tcRow'), tcProfile: $('#tcProfile'),
-  moreRow: $('#moreRow'), moreOp: $('#moreOp'), regionFields: $('#regionFields'), regionMode: $('#regionMode'),
-  regionX: $('#regionX'), regionY: $('#regionY'), regionW: $('#regionW'), regionH: $('#regionH'), moreMode: $('#moreMode'), moreMask: $('#moreMask'), moreStrength: $('#moreStrength'), moreBg: $('#moreBg'), moreHint: $('#moreHint'),
   tabbar: $('#tabbar'), navMain: $('#navMain'), assetFilters: $('#assetFilters'), assetGrid: $('#assetGrid'),
   assetEmpty: $('#assetEmpty'), assetTotal: $('#assetTotal'), assetSearch: $('#assetSearch'), assetBulk: $('#assetBulk'),
   assetSelAll: $('#assetSelAll'), assetSelNote: $('#assetSelNote'), assetBulkDelete: $('#assetBulkDelete'),
@@ -50,8 +48,8 @@ const state = {
   selected: new Set(),// 勾选的任务（批量开始/批量取消只针对它们）
   pollTimer: null,
   tickTimer: null,
-  tab: 'erase',                       // erase | enhance | link
-  tabBatch: { erase: null, enhance: null, asr: null, transcode: null, more: null, link: null },
+  tab: 'link',                       // link | erase | asr | enhance | transcode
+  tabBatch: { link: null, erase: null, asr: null, enhance: null, transcode: null },
   linkTasks: [],                      // 链接去水印创建的任务
 };
 
@@ -266,6 +264,7 @@ async function init() {
   render();
   switchPage('home');
   await restore();
+  await restoreHomeGeneration().catch(() => {});
 }
 
 /* ============================================================================
@@ -1256,7 +1255,7 @@ function tabForBatch(data) {
   if (operation === 'enhance' || operation === 'asr-subtitles' || operation === 'transcode') {
     return ({ enhance: 'enhance', 'asr-subtitles': 'asr', transcode: 'transcode' })[operation];
   }
-  if (['ocr-extract', 'face-blur', 'portrait-matte', 'region-blur'].includes(operation)) return 'more';
+  if (['ocr-extract', 'face-blur', 'portrait-matte', 'region-blur'].includes(operation)) return 'erase';
   if (operation === 'erase-subtitle' && (data.items || []).length && (data.items || []).every((item) => !item.fileId)) return 'link';
   return 'erase';
 }
@@ -1354,28 +1353,35 @@ async function restore() {
 
 function renderCredits() {
     const u = state.session?.user;
-    if (!u) return;
-    let badge = document.getElementById('creditsBadge');
-    if (!badge) {
-      badge = document.createElement('span');
-      badge.id = 'creditsBadge';
-      badge.className = 'credits-badge';
-      el.logoutBtn.parentNode.insertBefore(badge, el.logoutBtn);
-      badge.addEventListener('click', async () => {
-        const code = window.prompt('输入卡密（形如 WM-XXXX-XXXX-XXXX-XXXX）');
-        if (!code) return;
-        try {
-          const r = await jsonApi('/api/credits/redeem', { method: 'POST', body: JSON.stringify({ code }) });
-          state.session.user = r.user;
-          renderCredits();
-          toast(`充值成功 +${r.credits} 积分，余额 ${r.balance}`);
-        } catch (err) { toast(`充值失败：${err.message}`); }
-      });
+    const badge = el.creditsBadge || document.getElementById('creditsBadge');
+    if (!u || !badge) return;
+    badge.textContent = `积分 ${u.credits}`;
+    if (badge.dataset.bound !== '1') {
+      badge.dataset.bound = '1';
+      badge.addEventListener('click', redeemPrompt);
     }
-    badge.textContent = `积分 ${u.credits} · 充值`;
   if (el.adminBtn) el.adminBtn.hidden = u.role !== 'admin';
     badge.title = '点击输入卡密充值';
   }
+
+function setSettingsOpen(open) {
+  if (!el.settingsBtn || !el.settingsMenu) return;
+  el.settingsMenu.hidden = !open;
+  el.settingsBtn.setAttribute('aria-expanded', String(open));
+  el.settingsBtn.classList.toggle('is-open', open);
+}
+
+if (el.settingsBtn && el.settingsMenu) {
+  el.settingsBtn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    setSettingsOpen(el.settingsMenu.hidden);
+  });
+  el.settingsMenu.addEventListener('click', (event) => event.stopPropagation());
+  document.addEventListener('click', () => setSettingsOpen(false));
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { setSettingsOpen(false); el.settingsBtn.focus(); }
+  });
+}
 
 
 // 后台：生成卡密
@@ -1439,7 +1445,7 @@ if (el.adminBtn) {
   }
   el.adminMask.querySelector('#codeFilter').addEventListener('change', loadCodes);
 
-  el.adminBtn.addEventListener('click', () => { el.adminMask.hidden = false; showAdminTab('codes'); });
+  el.adminBtn.addEventListener('click', () => { setSettingsOpen(false); el.adminMask.hidden = false; showAdminTab('codes'); });
   el.adminClose.addEventListener('click', () => { el.adminMask.hidden = true; });
   el.adminMask.addEventListener('click', (e) => { if (e.target === el.adminMask) el.adminMask.hidden = true; });
   el.adminGen.addEventListener('click', async () => {
@@ -1531,6 +1537,7 @@ if (el.adminBtn) {
 
 el.logoutBtn.addEventListener('click', async () => {
   if (!markBusy(el.logoutBtn, '正在退出…')) return;
+  setSettingsOpen(false);
   try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }); } catch { /* 忽略 */ }
   sessionEndsAt = null;
   state.session = { authenticated: false };
@@ -1559,32 +1566,22 @@ el.dropzone.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.fileInput.click(); }
 });
 /* ============================================================================
- * 功能标签：去字幕 / 超清画质 / 链接去水印
- *   · 去字幕、超清画质共用「上传 + 批次列表」这套 UI，只是 operation 不同
- *   · 链接去水印是单条任务：粘贴直链 → 服务端探测时长 → 调用云端擦除 → 下载
+ * 工具标签：去水印 / 去字幕 / 加字幕 / 画质超清 / 视频压缩
+ * 五个工具共用「输入卡片 + 批次结果」的纵向页面骨架。
  * ========================================================================== */
 function tabPayload() {
   if (state.tab === 'enhance') return { operation: 'enhance', resolution: el.resSelect?.value || '1080p', toolVersion: el.verSelect?.value || 'standard' };
   if (state.tab === 'asr') return { operation: 'asr-subtitles', options: { language: el.asrLang?.value || 'auto', burn: el.asrBurn?.checked === true } };
   if (state.tab === 'transcode') return { operation: 'transcode', options: { profile: el.tcProfile?.value || '1080p' } };
-  if (state.tab === 'more') {
-    const op = el.moreOp?.value || 'ocr-extract';
-    if (op === 'ocr-extract') return { operation: op, options: { mode: el.moreMode?.value || 'Subtitle' } };
-    if (op === 'face-blur') return { operation: op, options: { maskMode: el.moreMask?.value || 'mosaic', strength: el.moreStrength?.value || 'medium' } };
-    if (op === 'region-blur') return { operation: op, options: { mode: el.regionMode?.value || 'delogo',
-      x: Number(el.regionX?.value ?? 70), y: Number(el.regionY?.value ?? 5), w: Number(el.regionW?.value ?? 25), h: Number(el.regionH?.value ?? 15) } };
-    return { operation: op, options: { background: el.moreBg?.value || 'green' } };
-  }
   return { operation: 'erase-subtitle', erasePreset: el.erasePreset?.value || 'standard' };
 }
 
 const TAB_META = {
-  erase: { title: '批量去字幕', desc: '一次最多 30 个视频（单个不超过 100 MB）。勾选任务后用「批量开始 / 批量取消」，也可以单独控制每一条；点「预览」对比源视频与结果。' },
-  asr: { title: '语音转字幕', desc: '识别视频里的语音，生成带时间戳的 SRT 字幕；可勾选「烧录成视频」直接得到带字幕的成片。按原片秒数计费。' },
-  transcode: { title: '压缩转码', desc: '把视频转码压缩到平台适合的分辨率/编码（1080P / 720P / H.265），输出 MP4，便于上传与分发。按原片秒数计费。' },
-  more: { title: '更多工具', desc: '字幕文稿 / 人脸打码 / 人像抠图：一次上传，批量处理，结果可下载或打包。' },
-  enhance: { title: '超清画质', desc: '把视频增强 / 超分到更清晰的画质（去噪、色彩、清晰度、超分）。按原片秒数计费，与分辨率档位无关。' },
-  link: { title: '链接去水印', desc: '粘贴公网视频直链，直接调用云端处理，视频无需上传到本服务器；处理方式为全屏模式擦除文字与文字水印。' },
+  link: { title: '视频去水印', desc: '粘贴公网视频直链，直接调用云端处理，无需先上传到服务器；支持一次添加多条链接。' },
+  erase: { title: '视频去字幕', desc: '上传视频，智能识别并擦除画面字幕；支持批量处理与原片、结果对比预览。' },
+  asr: { title: '视频加字幕', desc: '识别视频语音并生成带时间戳的 SRT 字幕，也可以直接烧录为带字幕的视频。' },
+  enhance: { title: '画质超清', desc: '对视频进行去噪、清晰度增强与超分辨率处理，最高可输出 4K。' },
+  transcode: { title: '视频压缩', desc: '将视频压缩为适合上传和分发的 MP4，可选择 1080P、720P 或 H.265。' },
 };
 
 async function setTab(tab) {
@@ -1598,14 +1595,10 @@ async function setTab(tab) {
   const isLink = tab === 'link';
   if (el.uploadCard) el.uploadCard.hidden = isLink;
   if (el.linkCard) el.linkCard.hidden = !isLink;
-  const wsWrap = document.getElementById('wsWrap');
-  if (wsWrap) wsWrap.classList.toggle('single', tab === 'link');
   if (el.modeRow) el.modeRow.hidden = tab !== 'erase';
   if (el.resRow) el.resRow.hidden = tab !== 'enhance';
   if (el.asrRow) el.asrRow.hidden = tab !== 'asr';
   if (el.tcRow) el.tcRow.hidden = tab !== 'transcode';
-  if (el.moreRow) el.moreRow.hidden = tab !== 'more';
-  if (tab === 'more') syncMoreOptions();
   stopPolling();
   state.items = [];
   state.selected.clear();
@@ -1665,29 +1658,8 @@ async function addLinkBatch() {
   }
 }
 
-
-/** 更多工具：按处理类型显示对应选项 */
-function syncMoreOptions() {
-  const op = el.moreOp?.value || 'ocr-extract';
-  const show = (node, on) => { if (node) node.hidden = !on; };
-  show(el.moreMode, op === 'ocr-extract');
-  show(el.moreMask, op === 'face-blur');
-  show(el.moreStrength, op === 'face-blur');
-  show(el.moreBg, op === 'portrait-matte');
-  show(el.regionFields, op === 'region-blur');
-  if (el.moreHint) {
-    el.moreHint.textContent = op === 'ocr-extract'
-      ? '识别画面里已烧录的硬字幕，导出带时间戳的 SRT 文稿；按原片秒数计费'
-      : op === 'face-blur'
-        ? '自动识别人脸并打码（马赛克/高斯模糊），适合隐私脱敏；按原片秒数计费'
-        : op === 'region-blur'
-          ? '在画面固定区域做消除/模糊/色块（适合台标、固定机位里的杂物）；按百分比填写位置；本地处理不消耗云端额度'
-        : '抠出人物主体，输出纯色底视频（绿幕最方便后期换背景）；按原片秒数计费';
-  }
-}
 if (el.tabbar) el.tabbar.addEventListener('click', (e) => { const b = e.target.closest('.tab'); if (b) setTab(b.dataset.tab); });
 if (el.linkAdd) el.linkAdd.addEventListener('click', addLinkBatch);
-if (el.moreOp) el.moreOp.addEventListener('change', syncMoreOptions);
 if (el.batchZip) el.batchZip.addEventListener('click', () => {
   const done = viewRows().filter((r) => r.status === 'succeeded' || r.status === 'done');
   if (!done.length) { toast('还没有已完成的产物可打包'); return; }
@@ -1737,17 +1709,7 @@ async function refreshHeader() {
     sessionEndsAt = Date.parse(d.expiresAt);
     const u = d.user;
     if (!u) return;
-    let badge = document.getElementById('creditsBadge');
-    if (!badge) {
-      badge = document.createElement('span');
-      badge.id = 'creditsBadge';
-      badge.className = 'credits-badge';
-      badge.title = '点击输入卡密充值';
-      el.logoutBtn.parentNode.insertBefore(badge, el.logoutBtn);
-      badge.addEventListener('click', redeemPrompt);
-    }
-    badge.textContent = `积分 ${u.credits} · 充值`;
-    if (el.adminBtn) el.adminBtn.hidden = u.role !== 'admin';
+    renderCredits();
     if (el.sessionLeft) el.sessionLeft.textContent = fmtCountdown(sessionEndsAt - Date.now());
     /* 超清已独立为标签页 */
   } catch { /* 忽略 */ }
@@ -1943,7 +1905,13 @@ function renderHome(){
   box.innerHTML = '';
   const list = (assetList || []).slice(0, 4);
   if (!list.length) {
-    box.innerHTML = '<div class="notice">还没有资产：先去「工具」上传并处理一个视频。</div>';
+    box.innerHTML = `
+      <div class="home-empty">
+        <span class="home-empty-icon" aria-hidden="true">＋</span>
+        <strong>还没有生成记录</strong>
+        <p>完成第一个视频后，作品会自动出现在这里。</p>
+        <button class="btn btn-primary" type="button" data-focus-prompt>开始创作</button>
+      </div>`;
     return;
   }
   const ICON = { video: '▶', text: 'T', audio: '♫', image: '▣' };
@@ -1970,15 +1938,460 @@ function goTool(tab){
 }
 
 document.addEventListener('click', (e) => {
+  const prompt = e.target.closest('[data-prompt]');
+  if (prompt) {
+    const input = document.getElementById('homeCmd');
+    if (input) {
+      input.value = prompt.dataset.prompt || '';
+      input.dispatchEvent(new Event('input'));
+      input.focus();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    return;
+  }
   const t = e.target.closest('[data-tool-tab]');
   if (t) { goTool(t.dataset.toolTab); return; }
   const p = e.target.closest('[data-page-go]');
-  if (p) { switchPage(p.dataset.pageGo); }
+  if (p) { switchPage(p.dataset.pageGo); return; }
+  if (e.target.closest('[data-focus-prompt]')) {
+    document.getElementById('homeCmd')?.focus();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
 });
 const homeGo = document.getElementById('homeCmdGo');
-if (homeGo) homeGo.addEventListener('click', () => goTool('erase'));
 const homeCmd = document.getElementById('homeCmd');
-if (homeCmd) homeCmd.addEventListener('keydown', (e) => { if (e.key === 'Enter') goTool('erase'); });
+const generationPreview = document.getElementById('generationPreview');
+const generationPreviewStage = document.getElementById('generationPreviewStage');
+const generationVideo = document.getElementById('generationVideo');
+const generationPreviewEmpty = document.getElementById('generationPreviewEmpty');
+const generationStageLabel = document.getElementById('generationStageLabel');
+const generationStageDetail = document.getElementById('generationStageDetail');
+const generationProgressTitle = document.getElementById('generationProgressTitle');
+const generationProgressPercent = document.getElementById('generationProgressPercent');
+const generationProgressTrack = document.getElementById('generationProgressTrack');
+const generationProgressBar = document.getElementById('generationProgressBar');
+const generationProgressSpec = document.getElementById('generationProgressSpec');
+const generationElapsed = document.getElementById('generationElapsed');
+const generationProgressNote = document.getElementById('generationProgressNote');
+const referenceInput = document.getElementById('referenceImage');
+const referenceTrigger = document.getElementById('referenceTrigger');
+const generationModeSelect = document.getElementById('generationMode');
+const referencePreviews = document.getElementById('referencePreviews');
+const referencePreviewList = document.getElementById('referencePreviewList');
+const referencePreviewCount = document.getElementById('referencePreviewCount');
+const referenceFiles = [];
+let referenceSequence = 0;
+
+function nextReferenceId() {
+  referenceSequence += 1;
+  return `ref_${Date.now().toString(36)}_${referenceSequence.toString(36)}`;
+}
+
+function referenceKind(file) {
+  const type = String((file && file.type) || '').toLowerCase();
+  if (type.startsWith('image/')) return 'image';
+  const name = String((file && file.name) || '').toLowerCase();
+  const extension = name.includes('.') ? name.split('.').pop() : '';
+  if (['jpg', 'jpeg', 'png', 'webp'].includes(extension)) return 'image';
+  return null;
+}
+
+function currentGenerationMode() {
+  return generationModeSelect?.value || 'text';
+}
+
+function clearReferenceFiles() {
+  for (const item of referenceFiles) URL.revokeObjectURL(item.url);
+  referenceFiles.splice(0);
+  renderReferencePreviews();
+}
+
+function syncGenerationMode({ clear = false } = {}) {
+  if (clear) clearReferenceFiles();
+  const mode = currentGenerationMode();
+  const textOnly = mode === 'text';
+  if (referenceInput) referenceInput.disabled = textOnly || generationBusy;
+  referenceTrigger?.classList.toggle('is-disabled', textOnly);
+  if (referenceTrigger) {
+    referenceTrigger.title = textOnly
+      ? '文生视频无需参考图片'
+      : mode === 'keyframes' ? '添加首帧与尾帧图片' : '添加 1–9 张参考图片';
+  }
+  const status = document.getElementById('generationStatus');
+  if (status && !generationBusy) {
+    status.textContent = textOnly
+      ? '文生视频无需参考文件，输入描述即可生成'
+      : mode === 'keyframes'
+        ? '请添加正好 2 张图片：第一张作为首帧，第二张作为尾帧'
+        : '请添加 1–9 张 JPG、PNG 或 WebP 参考图片';
+  }
+  if (homeCmd) {
+    homeCmd.placeholder = textOnly
+      ? '描述主体、动作、场景、镜头与光影……'
+      : mode === 'keyframes'
+        ? '描述从首帧到尾帧的主体动作、镜头运动和场景过渡……'
+        : '说明每张参考图的用途，并描述主体、动作、场景和镜头……';
+  }
+  renderReferencePreviews();
+}
+
+function renderReferencePreviews() {
+  if (!referencePreviews || !referencePreviewList) return;
+  referencePreviewList.replaceChildren();
+  referencePreviews.hidden = referenceFiles.length === 0;
+  const mode = currentGenerationMode();
+  if (referencePreviewCount) referencePreviewCount.textContent = mode === 'keyframes'
+    ? `${referenceFiles.length} / 2 帧`
+    : `${referenceFiles.length} / 9 张`;
+  for (const [index, item] of referenceFiles.entries()) {
+    const card = document.createElement('div');
+    card.className = `reference-preview-item is-${item.kind}`;
+    card.title = item.file.name;
+    const img = document.createElement('img');
+    img.src = item.url; img.alt = '';
+    card.appendChild(img);
+    const label = document.createElement('span');
+    label.className = 'reference-preview-label';
+    label.textContent = mode === 'keyframes' ? (index === 0 ? '首帧' : '尾帧') : `参考图 ${index + 1}`;
+    card.appendChild(label);
+    const remove = document.createElement('button');
+    remove.type = 'button'; remove.className = 'reference-preview-remove'; remove.dataset.referenceId = item.id;
+    remove.setAttribute('aria-label', `删除${label.textContent}`); remove.textContent = '×';
+    card.appendChild(remove);
+    referencePreviewList.appendChild(card);
+  }
+}
+
+if (referenceInput) {
+  referenceInput.addEventListener('change', () => {
+    const incoming = Array.from(referenceInput.files || []);
+    const max = currentGenerationMode() === 'keyframes' ? 2 : 9;
+    let rejected = 0;
+    let added = 0;
+    for (const file of incoming) {
+      const kind = referenceKind(file);
+      const duplicate = referenceFiles.some((item) => item.file.name === file.name && item.file.size === file.size && item.file.lastModified === file.lastModified);
+      if (!kind || duplicate || referenceFiles.length >= max) { rejected += 1; continue; }
+      try {
+        referenceFiles.push({ id: nextReferenceId(), kind, file, url: URL.createObjectURL(file) });
+        added += 1;
+      } catch {
+        rejected += 1;
+      }
+    }
+    referenceInput.value = '';
+    renderReferencePreviews();
+    if (added) toast(`已添加 ${added} 张参考图片`);
+    if (rejected) toast(`已跳过 ${rejected} 张重复、格式不支持或超过数量限制的图片`);
+  });
+}
+generationModeSelect?.addEventListener('change', () => {
+  syncGenerationMode({ clear: true });
+  toast(`已切换为${generationModeSelect.options[generationModeSelect.selectedIndex].text}`);
+});
+referencePreviewList?.addEventListener('click', (event) => {
+  const remove = event.target.closest('[data-reference-id]');
+  if (!remove) return;
+  const index = referenceFiles.findIndex((item) => item.id === remove.dataset.referenceId);
+  if (index < 0) return;
+  URL.revokeObjectURL(referenceFiles[index].url);
+  referenceFiles.splice(index, 1);
+  renderReferencePreviews();
+});
+
+function firstResultUrl(value) {
+  if (typeof value === 'string' && /^https?:\/\//i.test(value)) return value;
+  if (Array.isArray(value)) {
+    for (const item of value) { const found = firstResultUrl(item); if (found) return found; }
+  } else if (value && typeof value === 'object') {
+    for (const item of Object.values(value)) { const found = firstResultUrl(item); if (found) return found; }
+  }
+  return null;
+}
+
+const ACTIVE_GENERATION_STATES = new Set(['SUBMITTING', 'QUEUED', 'RUNNING']);
+let generationBusy = false;
+let generationMonitorToken = 0;
+syncGenerationMode();
+
+function setGenerationLocked(locked) {
+  generationBusy = locked;
+  if (homeGo) homeGo.disabled = locked;
+  if (homeCmd) homeCmd.disabled = locked;
+  if (referenceInput) referenceInput.disabled = locked || currentGenerationMode() === 'text';
+  referenceTrigger?.classList.toggle('is-disabled', locked || currentGenerationMode() === 'text');
+  for (const id of ['videoWorkflow', 'generationMode', 'videoRatio', 'videoResolution', 'videoDuration']) {
+    const control = document.getElementById(id);
+    if (control) control.disabled = locked;
+  }
+  document.querySelector('.creation-composer')?.classList.toggle('is-locked', locked);
+  generationPreview?.classList.toggle('is-busy', locked);
+  for (const button of document.querySelectorAll('.reference-preview-remove')) button.disabled = locked;
+  if (homeGo) homeGo.textContent = locked ? '…' : '↑';
+}
+
+function generationStatusText(status) {
+  return ({
+    SUBMITTING: '正在提交', QUEUED: '等待云端资源', RUNNING: '正在生成视频',
+    SUCCESS: '视频生成完成', FAILED: '视频生成失败', ERROR: '视频生成失败',
+    CANCELED: '任务已取消', CANCELLED: '任务已取消',
+  })[status] || '正在处理';
+}
+
+function generationFailureMessage(generation) {
+  const code = String(generation?.errorCode || '').toUpperCase();
+  const raw = String(generation?.error || generation?.message || '').trim();
+  if (code === 'PROVIDER_BALANCE_INSUFFICIENT' || /insufficient account balance/i.test(raw)) {
+    return '云端视频生成服务余额不足，任务未创建。请联系管理员充值服务商账户后重试。';
+  }
+  if (code === 'PROVIDER_AUTH_FAILED' || /unauthori[sz]ed|invalid.*token|token.*invalid/i.test(raw)) {
+    return '云端视频生成服务鉴权失败，任务未创建。请联系管理员检查接口 Token。';
+  }
+  if (code === 'PROVIDER_RATE_LIMITED' || /rate limit|too many requests/i.test(raw)) {
+    return '云端视频生成服务当前请求过多，任务未创建。请稍后再试。';
+  }
+  if (raw) return raw;
+  return generation?.failureStage === 'submission'
+    ? '生成任务未能提交到云端，请稍后重试；若持续失败，请联系管理员。'
+    : '云端任务已终止，但接口没有返回具体原因。请调整描述后重试。';
+}
+
+function renderGenerationPreview(generation) {
+  if (!generationPreview || !generation) return;
+  const status = String(generation.status || 'QUEUED').toUpperCase();
+  const active = ACTIVE_GENERATION_STATES.has(status);
+  const failed = ['FAILED', 'ERROR', 'CANCELED', 'CANCELLED'].includes(status);
+  const canceled = ['CANCELED', 'CANCELLED'].includes(status);
+  const rawProgress = generation.estimatedProgress;
+  const hasProgress = rawProgress !== null && rawProgress !== undefined && Number.isFinite(Number(rawProgress));
+  const progress = status === 'SUCCESS' ? 100 : hasProgress ? Math.max(0, Math.min(99, Number(rawProgress))) : 0;
+  const progressLabel = failed ? (canceled ? '已取消' : '失败') : `${Math.round(progress)}%`;
+  const resultUrl = status === 'SUCCESS' ? firstResultUrl(generation.results) : null;
+  const createdAt = Date.parse(generation.createdAt || '') || Date.now();
+  const elapsed = generation.duration ?? Math.max(0, Math.floor((Date.now() - createdAt) / 1000));
+  const resolution = generation.parameters?.resolution || '—';
+  const duration = generation.parameters?.duration ? `${generation.parameters.duration} 秒` : '';
+
+  generationPreview.hidden = false;
+  generationPreview.classList.toggle('is-complete', status === 'SUCCESS');
+  generationPreview.classList.toggle('is-failed', failed);
+  if (generationProgressBar) generationProgressBar.style.width = `${progress}%`;
+  if (generationProgressPercent) generationProgressPercent.textContent = progressLabel;
+  if (generationProgressTrack) {
+    generationProgressTrack.setAttribute('aria-valuenow', String(Math.round(progress)));
+    generationProgressTrack.setAttribute('aria-valuetext', progressLabel);
+  }
+  const stageTitle = failed && generation.failureStage === 'submission' ? '任务提交失败' : generationStatusText(status);
+  if (generationProgressTitle) generationProgressTitle.textContent = stageTitle;
+  if (generationProgressSpec) generationProgressSpec.textContent = [resolution, duration].filter(Boolean).join(' · ');
+  if (generationElapsed) generationElapsed.textContent = `已耗时 ${Math.max(0, Math.round(Number(elapsed) || 0))} 秒`;
+  if (generationStageLabel) generationStageLabel.textContent = stageTitle;
+  if (generationStageDetail) {
+    generationStageDetail.textContent = failed
+      ? generationFailureMessage(generation)
+      : status === 'SUCCESS'
+        ? (resultUrl ? '生成结果已就绪，可以直接播放与全屏预览。' : '任务已完成，但接口没有返回可播放的视频地址。')
+        : status === 'QUEUED' ? '任务已进入队列，请保持页面打开。' : 'AI 正在构建画面与运动效果，请耐心等待。';
+  }
+  if (generationProgressNote) {
+    generationProgressNote.textContent = failed
+      ? (generation.failureStage === 'submission'
+          ? '失败发生在提交阶段，云端任务未创建，因此不显示虚假的 100% 进度。'
+          : '云端任务已终止；失败状态不代表生成进度达到 100%。')
+      : status === 'SUCCESS'
+        ? '云端任务已完成，并已返回生成结果。'
+        : '当前接口不返回精确百分比，进度为根据任务状态与已耗时计算的预计值。';
+  }
+  if (resultUrl && generationVideo) {
+    if (generationVideo.src !== resultUrl) generationVideo.src = resultUrl;
+    generationVideo.hidden = false;
+    if (generationPreviewEmpty) generationPreviewEmpty.hidden = true;
+  } else {
+    if (generationVideo) {
+      generationVideo.hidden = true;
+      if (status !== 'SUCCESS') generationVideo.removeAttribute('src');
+    }
+    if (generationPreviewEmpty) generationPreviewEmpty.hidden = false;
+  }
+  if (generationPreviewStage) generationPreviewStage.dataset.status = status.toLowerCase();
+  const statusLine = document.getElementById('generationStatus');
+  if (statusLine) statusLine.textContent = active
+    ? `${generationStatusText(status)} · 当前仅支持一个生成任务`
+    : generationStatusText(status);
+}
+
+async function monitorGeneration(initial) {
+  const token = ++generationMonitorToken;
+  let generation = initial;
+  setGenerationLocked(ACTIVE_GENERATION_STATES.has(String(generation.status || '').toUpperCase()));
+  renderGenerationPreview(generation);
+  while (token === generationMonitorToken && ACTIVE_GENERATION_STATES.has(String(generation.status || '').toUpperCase())) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    if (token !== generationMonitorToken) return;
+    try {
+      generation = await jsonApi(`/api/video-generations/${encodeURIComponent(generation.taskId)}`, { timeoutMs: 35_000 });
+      renderGenerationPreview(generation);
+    } catch (err) {
+      if (generationStageDetail) generationStageDetail.textContent = `暂时无法更新进度，正在自动重试：${err.message}`;
+      continue;
+    }
+  }
+  if (token !== generationMonitorToken) return;
+  setGenerationLocked(false);
+  if (String(generation.status).toUpperCase() === 'SUCCESS') toast('视频生成完成');
+  else toast(generationStatusText(String(generation.status).toUpperCase()));
+}
+
+async function restoreHomeGeneration() {
+  const data = await jsonApi('/api/video-generations/current', { timeoutMs: 35_000 });
+  if (!data.generation) return;
+  if (ACTIVE_GENERATION_STATES.has(String(data.generation.status || '').toUpperCase())) {
+    monitorGeneration(data.generation);
+  } else {
+    renderGenerationPreview(data.generation);
+    setGenerationLocked(false);
+  }
+}
+
+async function uploadVideoReference(item, index, total) {
+  if (generationStageLabel) generationStageLabel.textContent = '正在上传参考素材';
+  if (generationStageDetail) generationStageDetail.textContent = `正在上传第 ${index + 1} / ${total} 个文件：${item.file.name}`;
+  if (generationProgressTitle) generationProgressTitle.textContent = '正在上传参考素材';
+  const response = await fetch('/api/video-references', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'content-type': item.file.type || 'application/octet-stream',
+      'x-file-name': encodeURIComponent(item.file.name),
+    },
+    body: item.file,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 401) showLogin('会话已过期，请重新登录');
+  if (!response.ok) throw Object.assign(new Error(data.error || `参考素材上传失败（HTTP ${response.status}）`), { status: response.status, data });
+  return data.reference;
+}
+
+async function runHomeCommand() {
+  if (generationBusy) {
+    toast('当前视频仍在生成，完成后才能创建下一个任务');
+    return;
+  }
+  const command = String(homeCmd?.value || '').trim();
+  if (!command) {
+    toast('先描述一下想生成的视频');
+    homeCmd?.focus();
+    return;
+  }
+  const mode = currentGenerationMode();
+  if (mode === 'text' && referenceFiles.length) {
+    toast('文生视频不需要参考图片，请移除图片后再提交');
+    return;
+  }
+  if (mode === 'multi_image' && (referenceFiles.length < 1 || referenceFiles.length > 9)) {
+    toast('多图生视频需要添加 1–9 张参考图片');
+    return;
+  }
+  if (mode === 'keyframes' && referenceFiles.length !== 2) {
+    toast('首尾帧生视频需要正好 2 张图片：第一张为首帧，第二张为尾帧');
+    return;
+  }
+  const status = document.getElementById('generationStatus');
+  const ratio = document.getElementById('videoRatio')?.value || '16:9';
+  const resolution = document.getElementById('videoResolution')?.value || '768p';
+  const duration = Number(document.getElementById('videoDuration')?.value || 5);
+  const resolutionOption = ratio === '1:1'
+    ? `${resolution.toLowerCase()}(1:1)`
+    : `${resolution.toLowerCase()}${ratio === '9:16' ? '竖' : '横'}`;
+  const workflow = state.config?.videoGeneration?.workflows?.[mode]
+    || (mode === 'text'
+      ? document.getElementById('videoWorkflow')?.value
+      : mode === 'keyframes' ? state.config?.videoGeneration?.keyframeWorkflow : state.config?.videoGeneration?.imageWorkflow);
+  if (!workflow) {
+    toast('当前生成方式尚未配置工作流，请联系管理员');
+    return;
+  }
+  const submitting = {
+    status: 'SUBMITTING',
+    createdAt: new Date().toISOString(),
+    estimatedProgress: 4,
+    parameters: { duration, resolution: resolutionOption },
+    mode,
+    results: [],
+  };
+  setGenerationLocked(true);
+  renderGenerationPreview(submitting);
+  if (status) status.textContent = '正在提交生成任务…';
+  try {
+    const uploadedReferences = [];
+    for (let index = 0; index < referenceFiles.length; index += 1) {
+      uploadedReferences.push(await uploadVideoReference(referenceFiles[index], index, referenceFiles.length));
+      const uploadProgress = 4 + Math.round(((index + 1) / referenceFiles.length) * 8);
+      if (generationProgressBar) generationProgressBar.style.width = `${uploadProgress}%`;
+      if (generationProgressPercent) generationProgressPercent.textContent = `${uploadProgress}%`;
+    }
+    if (status) status.textContent = referenceFiles.length ? '参考素材上传完成，正在提交生成任务…' : '正在提交生成任务…';
+    const created = await jsonApi('/api/video-generations', {
+      method: 'POST',
+      body: JSON.stringify({
+        prompt: command,
+        mode,
+        workflow,
+        parameters: { duration, resolution: resolutionOption },
+        referenceIds: uploadedReferences.map((reference) => reference.id),
+      }),
+      timeoutMs: 35_000,
+    });
+    toast('视频任务已提交，正在云端生成');
+    monitorGeneration(created);
+  } catch (err) {
+    if (err.status === 409 && err.data?.generation) {
+      monitorGeneration(err.data.generation);
+      toast('已有视频正在生成，已恢复当前任务');
+      return;
+    }
+    if (status) status.textContent = `提交失败：${err.message}`;
+    renderGenerationPreview({
+      ...submitting,
+      status: 'FAILED',
+      estimatedProgress: null,
+      failureStage: err.data?.stage || 'submission',
+      errorCode: err.data?.errorCode || '',
+      error: err.message,
+    });
+    toast(`视频生成失败：${err.message}`);
+    setGenerationLocked(false);
+  }
+}
+if (homeGo) homeGo.addEventListener('click', runHomeCommand);
+if (homeCmd) {
+  const promptCount = document.getElementById('promptCount');
+  homeCmd.addEventListener('input', () => { if (promptCount) promptCount.textContent = String(homeCmd.value.length); });
+  homeCmd.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') runHomeCommand();
+  });
+}
+
+const referenceUpload = document.getElementById('referenceUpload');
+document.querySelectorAll('[data-gen-mode]').forEach((button) => {
+  button.addEventListener('click', () => {
+    document.querySelectorAll('[data-gen-mode]').forEach((item) => {
+      const active = item === button;
+      item.classList.toggle('is-active', active);
+      item.setAttribute('aria-selected', String(active));
+    });
+    if (referenceUpload) referenceUpload.hidden = button.dataset.genMode !== 'image';
+  });
+});
+
+function syncPreviewSpec() {
+  const ratio = document.getElementById('videoRatio')?.value || '16:9';
+  const duration = document.getElementById('videoDuration')?.value || '5';
+  const resolution = document.getElementById('videoResolution')?.value || '768p';
+  const spec = document.getElementById('previewSpec');
+  if (spec) spec.textContent = `${ratio} · ${duration} 秒 · ${resolution.toUpperCase()}`;
+}
+['videoRatio', 'videoDuration', 'videoResolution'].forEach((id) => document.getElementById(id)?.addEventListener('change', syncPreviewSpec));
 
 /* ============================================================================
  * 任务中心
@@ -2107,7 +2520,7 @@ function syncToolsAside() {
   if (!aside) return;
   const batchCard = document.getElementById('batchCard');
   const hasBatch = batchCard && !batchCard.hidden;
-  aside.hidden = hasBatch || currentPage !== 'tools';
+  aside.hidden = hasBatch || currentPage !== 'tools' || state.tab === 'link';
   if (aside.hidden) return;
   const box = document.getElementById('toolsRecent');
   if (!box) return;

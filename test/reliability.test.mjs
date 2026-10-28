@@ -14,7 +14,7 @@ import { probeVideoDuration } from '../media.mjs';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function until(fn, timeout = 10000) {
   const end = Date.now() + timeout;
-  while (Date.now() < end) { const value = await fn(); if (value) return value; await sleep(50); }
+  while (Date.now() < end) { const value = await fn(); if (value) return value; await sleep(550); }
   throw new Error('Timed out waiting for condition');
 }
 async function freePort() {
@@ -42,6 +42,10 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
       let raw = ''; for await (const chunk of req) raw += chunk;
       const workflow = decodeURIComponent(req.url.slice('/comfy/comfyui_workflow/'.length));
       const input = JSON.parse(raw);
+      if (input.prompt === 'force submission failure') {
+        res.statusCode = 402;
+        return json({ message:'Insufficient account balance' });
+      }
       const taskId = `video_${videoWorkflowCalls.length + 1}`;
       videoWorkflowCalls.push({ workflow, input, taskId });
       return json({ code:'Success', data:{ task_id:taskId, status:'QUEUED', created_at:new Date().toISOString() }, msg:'' });
@@ -71,6 +75,16 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     seed.users[id] = { id, status:'active', role: id === 'admin' ? 'admin' : 'user', credits: id === 'poor' ? 0 : 100 };
     seed.sessions[id] = { userId:id, createdAt:new Date().toISOString(), expiresAt:Date.now()+30*60*1000 };
   }
+  await fs.mkdir(path.join(dir, 'assets'), { recursive: true });
+  await fs.writeFile(path.join(dir, 'assets', 'saved-video.mp4'), Buffer.alloc(2048, 7));
+  seed.videoGenerations = { video_finished: { taskId:'video_finished', userId:'a', status:'SUCCESS',
+    prompt:'保留在资产中的提示词', results:[], createdAt:new Date().toISOString() },
+    older_success: { taskId:'older_success', userId:'poor', status:'SUCCESS', prompt:'older', results:[],
+      createdAt:'2020-01-01T00:00:00Z', updatedAt:'2099-01-01T00:00:00Z' },
+    newest_failed: { taskId:'newest_failed', userId:'poor', status:'FAILED', prompt:'failed', results:[], createdAt:new Date().toISOString() } };
+  seed.assets = { 'generation:video_finished:0': { id:'generation:video_finished:0', userId:'a',
+    name:'saved-video.mp4', kind:'video', ext:'.mp4', mime:'video/mp4', size:2048,
+    source:'generation', state:'ready', storedPath:'assets/saved-video.mp4', createdAt:new Date().toISOString() } };
   await fs.writeFile(path.join(dir,'db.json'),JSON.stringify(seed));
   const childOptions = { cwd: path.resolve('.'), env: { ...process.env,
     DATA_DIR: dir, HOST:'127.0.0.1', PORT:String(port), AMK_API_KEY:'test-key',
@@ -114,7 +128,7 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
   };
   const start = async(id, user='a')=>api(`/api/tasks/${id}/start`,{method:'POST',user,body:{}});
   const cancel = async(id, user='a')=>api(`/api/tasks/${id}`,{method:'DELETE',user});
-  const task = async(id,user='admin')=>(await api(`/api/tasks/${id}`,{user})).data.task;
+  const task = async(id,user='a')=>(await api(`/api/tasks/${id}`,{user})).data.task;
 
   await t.test('malformed cookies and path escapes do not terminate the server; session cookie renews',async()=>{
     const bad=await api('/api/me',{headers:{Cookie:'clp_sid=%'}});assert.equal(bad.status,401);
@@ -141,12 +155,17 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
       mode:'text', workflow:'minimax_h3_lightx2v_no_pic', prompt:'text prompt', parameters:{duration:5,resolution:'768p竖'}, referenceIds:[],
     }});
     assert.equal(text.status,202,JSON.stringify(text.data));
+    const adminVideoId = text.data.taskId;
+    assert.equal((await api(`/api/video-generations/${adminVideoId}`,{user:'a',method:'DELETE'})).status,404);
+    assert.equal((await api(`/api/video-generations/${adminVideoId}`,{user:'admin',method:'DELETE'})).status,409);
     const a1=await uploadReference('a1.jpg'), a2=await uploadReference('a2.jpg');
+    assert.equal((await api(`/r/${a1.id}`,{user:'admin'})).status,404);
     const multi = await api('/api/video-generations',{user:'a',method:'POST',body:{
       mode:'multi_image', workflow:'minimax_h3_lightx2v_v5_15s', prompt:'multi prompt', parameters:{duration:10,resolution:'768p竖'}, referenceIds:[a1.id,a2.id],
     }});
     assert.equal(multi.status,202,JSON.stringify(multi.data));
     const b1=await uploadReference('b1.jpg','b'), b2=await uploadReference('b2.jpg','b');
+    assert.equal((await api(`/r/${b1.id}`,{user:'admin'})).status,404);
     const frames = await api('/api/video-generations',{user:'b',method:'POST',body:{
       mode:'keyframes', workflow:'minimax_h3_lightx2v', prompt:'transition prompt', parameters:{duration:5,resolution:'480p竖'}, referenceIds:[b1.id,b2.id],
     }});
@@ -161,7 +180,81 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     assert.match(videoWorkflowCalls[2].input.last_frame,/\/r\/ref_/);
     assert.equal(videoWorkflowCalls[2].input.ref_image_0,undefined);
   });
+  await t.test('assets survive task dismissal and support owner-only download, reuse and independent deletion', async () => {
+    const image = await uploadReference('library.jpg');
+    assert.equal(image.expiresAt, null);
+    const imageAssetId = `reference:${image.id}`;
+    const assetRoute = `/api/assets/${encodeURIComponent(imageAssetId)}`;
+    const list = await api('/api/assets');
+    assert.ok(list.data.assets.some((asset) => asset.id === imageAssetId && asset.kind === 'image'));
+    assert.ok(list.data.assets.some((asset) => asset.id === 'prompt:video_finished' && asset.text.includes('提示词')));
+    assert.equal((await api(`${assetRoute}/content`, {user:'b'})).status, 404);
+    assert.equal((await api(assetRoute, {user:'b',method:'DELETE'})).status, 404);
+    const reuse = await api(`${assetRoute}/reference`, {method:'POST',body:{}});
+    assert.equal(reuse.status,201); assert.notEqual(reuse.data.reference.id,image.id);
+    assert.equal(reuse.data.reference.kind,'image');
+    assert.equal((await api('/api/video-generations/video_2',{user:'a',method:'DELETE'})).status,409);
+    assert.equal((await api('/api/video-generations/video_2',{user:'admin',method:'DELETE'})).status,404);
+    const inUseAsset = list.data.assets.find((asset) => asset.name === 'a1.jpg');
+    const inUse = await api(`/api/assets/${encodeURIComponent(inUseAsset.id)}`, {method:'DELETE'});
+    assert.equal(inUse.status,409);
+    assert.equal((await api('/api/video-generations/video_finished',{user:'admin'})).status,404);
+    assert.equal((await api('/api/assets',{user:'admin'})).data.assets.some((asset) => asset.id === 'prompt:video_finished'), false);
+    assert.equal((await api('/api/video-generations/video_finished',{method:'DELETE'})).status,200);
+    const saved = '/api/assets/'+encodeURIComponent('generation:video_finished:0');
+    const media = await fetch(base+saved+'/content?dl=1',{headers:{Cookie:'clp_sid=a',Range:'bytes=0-31'}});
+    assert.equal(media.status,206); assert.equal((await media.arrayBuffer()).byteLength,32);
+    assert.match(media.headers.get('content-disposition'),/attachment/);
+    assert.equal((await api(saved,{method:'DELETE'})).status,200);
+    assert.equal((await api(saved+'/content')).status,404);
+    assert.equal((await api(assetRoute,{method:'DELETE'})).status,200);
+    assert.equal((await api(`/r/${reuse.data.reference.id}`)).status,404);
+    const after = await api('/api/assets');
+    assert.ok(!after.data.assets.some(asset=>asset.id===imageAssetId || asset.id==='generation:video_finished:0'));
+    assert.ok(after.data.assets.some(asset=>asset.id==='prompt:video_finished'));
+  });
+  await t.test('failed tasks can be dismissed and the current panel never falls back to older tasks', async () => {
+    const current = await api('/api/video-generations/current',{user:'poor'});
+    assert.equal(current.data.generation.taskId,'newest_failed');
+    assert.equal((await api('/api/video-generations/newest_failed',{user:'poor',method:'DELETE'})).status,200);
+    assert.equal((await api('/api/video-generations/current',{user:'poor'})).data.generation,null);
+    const rejected = await api('/api/video-generations',{user:'poor',method:'POST',body:{
+      mode:'text', workflow:'minimax_h3_lightx2v_no_pic', prompt:'force submission failure',
+      parameters:{duration:5,resolution:'768p竖'}, referenceIds:[],
+    }});
+    assert.equal(rejected.status,402);
+    const failure = rejected.data.generation;
+    assert.equal(failure.status,'FAILED'); assert.equal(failure.failureStage,'submission');
+    assert.equal((await api('/api/video-generations/current',{user:'poor'})).data.generation.taskId,failure.taskId);
+    assert.equal((await api(`/api/video-generations/${failure.taskId}`,{user:'a',method:'DELETE'})).status,404);
+    assert.equal((await api(`/api/video-generations/${failure.taskId}`,{user:'poor',method:'DELETE'})).status,200);
+    assert.equal((await api('/api/video-generations/current',{user:'poor'})).data.generation,null);
+    assert.ok((await api('/api/assets',{user:'poor'})).data.assets.some(asset=>asset.text==='force submission failure'));
+  });
   const file=await upload(3.2);
+  await t.test('raw media IDs require login and signed provider URLs are short-lived and owner-bound', async () => {
+    const uploaded = await api('/api/uploads', { method:'POST', raw:'signed-media', headers:{'X-File-Name':'private.mp4'} });
+    assert.equal(uploaded.status,200);
+    const fileUrl = new URL(uploaded.data.file.url);
+    assert.ok(fileUrl.searchParams.has('signature'));
+    assert.equal((await fetch(base + fileUrl.pathname)).status,401);
+    assert.equal((await fetch(fileUrl)).status,200);
+    assert.equal((await api(fileUrl.pathname,{user:'b'})).status,404);
+    assert.equal((await api(fileUrl.pathname,{user:'admin'})).status,404);
+    const tampered = new URL(fileUrl); tampered.searchParams.set('signature','bad');
+    assert.equal((await fetch(tampered)).status,401);
+    const expired = new URL(fileUrl); expired.searchParams.set('expires',String(Math.floor(Date.now()/1000)-1));
+    assert.equal((await fetch(expired)).status,401);
+    assert.equal((await api(fileUrl.pathname)).status,200);
+
+    const ref = await uploadReference('private.jpg');
+    const referenceUrl = new URL(ref.url);
+    assert.equal((await fetch(base + referenceUrl.pathname)).status,401);
+    assert.equal((await fetch(referenceUrl)).status,200);
+    assert.equal((await api(referenceUrl.pathname,{user:'admin'})).status,404);
+    assert.equal((await api(referenceUrl.pathname,{user:'b'})).status,404);
+    assert.equal((await api(referenceUrl.pathname)).status,200);
+  });
   await t.test('legacy process route requires credits and rejects invalid media',async()=>{
     const poorFile=await upload(3.2,'poor');
     const r=await api(`/api/files/${poorFile}/process`,{user:'poor',method:'POST',body:{durationSec:1}});
@@ -205,11 +298,19 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     assert.equal(appendedTask.modelVersion, 'v5');
     assert.equal(appendedTask.eraseRatioLocation[0].bottom_right_y, 0.5);
   });
-  await t.test('server duration determines price; admin-triggered refunds go to the actual payer',async()=>{
-    assert.equal((await start(aId,'admin')).status,202);
-    assert.equal(await credits('admin'),96);assert.equal(await credits(),100);
+  await t.test('admins cannot read or control another user task; its owner receives any refund',async()=>{
+    assert.equal((await api(`/api/tasks/${aId}` ,{user:'admin'})).status,404);
+    assert.equal((await start(aId,'admin')).status,404);
+    assert.equal((await api(`/api/batches/${a.batch.id}`,{user:'admin'})).status,404);
+    assert.equal((await api(`/api/download/${aId}`,{user:'admin'})).status,404);
+    assert.equal((await api(`/f/${file}`,{user:'admin'})).status,404);
+    assert.equal((await api('/api/tasks',{user:'admin'})).data.tasks.some((entry)=>entry.id===aId),false);
+    assert.equal(await credits('admin'),100);assert.equal(await credits(),100);
+    assert.equal((await start(aId)).status,202);
+    assert.equal(await credits(),96);
     await until(()=>upstreamTasks.size===1);
-    assert.equal((await cancel(aId,'admin')).status,200);
+    assert.equal((await cancel(aId,'admin')).status,404);
+    assert.equal((await cancel(aId)).status,200);
     assert.equal(await credits('admin'),100);assert.equal(await credits(),100);
     await sleep(1200);
   });
@@ -359,7 +460,7 @@ test('session refresh updates countdown and handles expiry', async () => {
   const code = source.slice(start, source.indexOf('\nrefreshHeader();', start));
   const expiresAt = new Date(Date.now() + 3600000).toISOString();
   let loginShown = false;
-  const context = vm.createContext({ state: { session: { authenticated: true } }, sessionEndsAt: 1,
+  const context = vm.createContext({ state: { session: { authenticated: true } }, sessionEndsAt: 1, workspaceEpoch: 0,
     el: { adminBtn: {}, sessionLeft: {} }, document: { getElementById: () => ({}) },
     fetch: async () => ({ json: async () => ({ authenticated: true, expiresAt, user: { credits: 5 } }) }),
     fmtCountdown: String, syncEnhance() {}, showLogin() { loginShown = true; } });
@@ -369,4 +470,25 @@ test('session refresh updates countdown and handles expiry', async () => {
   context.fetch = async () => ({ json: async () => ({ authenticated: false }) });
   await context.refreshHeader();
   assert.equal(context.sessionEndsAt, null); assert.equal(loginShown, true);
+});
+
+test('a late generation poll cannot replace the current preview', async () => {
+  const source = await fs.readFile('public/app.js','utf8');
+  const start = source.indexOf('async function monitorGeneration(initial)');
+  const end = source.indexOf("document.getElementById('generationDelete')",start);
+  let resolvePoll;
+  const rendered = [];
+  const context = vm.createContext({ generationMonitorToken:0,
+    ACTIVE_GENERATION_STATES:new Set(['RUNNING','QUEUED']),
+    setGenerationLocked:()=>{}, renderGenerationPreview:(generation)=>rendered.push(generation.taskId),
+    setTimeout:(callback)=>callback(), jsonApi:()=>new Promise(resolve=>{resolvePoll=resolve;}),
+    generationStageDetail:{}, toast:()=>{}, generationStatusText:()=>'',
+  });
+  vm.runInContext(source.slice(start,end),context);
+  const pending = vm.runInContext("monitorGeneration({taskId:'older-task',status:'RUNNING'})",context);
+  await until(()=>Boolean(resolvePoll));
+  context.generationMonitorToken += 1;
+  resolvePoll({taskId:'older-task',status:'SUCCESS'});
+  await pending;
+  assert.deepEqual(rendered,['older-task']);
 });

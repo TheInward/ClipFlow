@@ -7,7 +7,7 @@
 <meta name="description" content="ClipFlow AI 是一站式 AI 视频创作平台，支持文字与参考素材生成视频，并提供字幕处理、画质增强、视频压缩与资产管理。" />
 <meta name="color-scheme" content="light" />
 <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-<link rel="stylesheet" href="/styles.css?v=2026102709" />
+<link rel="stylesheet" href="/styles.css?v=202610281419" />
 </head>
 <body>
 
@@ -139,16 +139,9 @@
               <span id="generationElapsed">已耗时 0 秒</span>
             </div>
             <p id="generationProgressNote">当前接口不返回精确百分比，进度为根据任务状态与已耗时计算的预计值。</p>
+            <div class="generation-result-actions"><button class="btn btn-ghost" type="button" id="generationDelete" hidden>删除任务</button><button class="btn btn-ghost" type="button" data-page-go="assets">查看资产</button></div>
           </div>
         </section>
-
-        <div class="creation-suggestions" aria-label="创作灵感">
-          <span>快速开始</span>
-          <button type="button" data-prompt="一支具有高级光影质感的产品广告，微距镜头，缓慢环绕运镜">产品广告</button>
-          <button type="button" data-prompt="电影感人物短片，自然光，细腻表情，浅景深，缓慢推进镜头">人物短片</button>
-          <button type="button" data-prompt="品牌社交媒体短视频，现代构图，节奏鲜明，干净背景">营销视频</button>
-          <button type="button" data-prompt="动画风格的奇幻场景，漂浮岛屿与云海，镜头缓慢穿行">动画场景</button>
-        </div>
 
         <section class="inspiration-section" aria-labelledby="inspirationTitle">
           <div class="inspiration-head">
@@ -188,13 +181,13 @@
         <div class="card-head">
           <div>
             <h2>添加视频链接</h2>
-            <p class="muted">支持公网视频直链（.mp4 / .mov / .mkv / .avi / .flv / .ts / .wmv），视频无需上传到本服务器。</p>
+            <p class="muted">支持抖音分享链接、分享文案和公网视频直链；抖音视频默认使用中等码率。</p>
           </div>
           <span class="pill">最多 30 条</span>
         </div>
-        <textarea id="linkInputs" class="url-input url-area" rows="4" placeholder="每行粘贴一个视频直链，例如：&#10;https://example.com/a.mp4&#10;https://cdn.example.com/b.mov"></textarea>
+        <textarea id="linkInputs" class="url-input url-area" rows="4" placeholder="粘贴抖音分享链接或完整分享文案，也支持视频直链。多个链接可分行粘贴。"></textarea>
         <div class="url-row">
-          <span class="hint" id="linkHint">每行一个链接；使用全屏模式擦除文字与文字水印。抖音、快手等分享短链暂不支持，请先保存视频后到「去字幕」上传。</span>
+          <span class="hint" id="linkHint">抖音链接提取平台视频，默认选择中等码率；视频直链使用全屏模式擦除文字与文字水印。快手等其他平台分享链接暂不支持。</span>
           <button class="btn btn-primary" id="linkAdd" type="button">添加链接</button>
         </div>
         <div class="notice notice-danger" id="linkNotice" hidden></div>
@@ -329,11 +322,12 @@
         <div class="page-head">
           <p class="eyebrow">ASSETS</p>
           <h1>资产</h1>
-          <p>上传的素材与处理完成的作品，统一在这里管理。</p>
+          <p>提示词、上传素材与生成作品按格式分类保存，可下载、删除或再次用于创作。</p>
         </div>
         <div class="asset-bar">
           <div class="filters" id="assetFilters"></div>
           <div class="asset-tools">
+            <label class="btn btn-ghost asset-upload">上传素材<input id="assetUpload" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm,audio/*" multiple hidden /></label>
             <input class="search2" id="assetSearch" placeholder="搜索资产名称…" />
             <span class="asset-total" id="assetTotal">共 0 项</span>
           </div>
@@ -346,7 +340,7 @@
           </div>
         </div>
         <div class="asset-grid" id="assetGrid"></div>
-        <div class="notice" id="assetEmpty" hidden>还没有资产：先在「工具」里上传并处理一个视频。</div>
+        <div class="notice" id="assetEmpty" hidden>还没有此类资产。可上传素材，或在「创作」中生成视频。</div>
       </section>
 
       <!-- ===================== 任务 ===================== -->
@@ -391,7 +385,7 @@
   </div><!-- /shell -->
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/app.js?v=2026102710" type="module"></script>
+  <script src="/app.js?v=202610281419" type="module"></script>
   <div class="admin-mask" id="adminMask" hidden>
     <div class="admin-panel" role="dialog" aria-modal="true" aria-labelledby="adminTitle">
       <div class="admin-head">

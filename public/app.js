@@ -53,7 +53,13 @@ const state = {
   linkTasks: [],                      // 链接去水印创建的任务
 };
 
-const STORE_KEY = 'clipflow.batchId';
+const ACCOUNT_CHANGE_KEY = 'clipflow.account.changed';
+let workspaceEpoch = 0;
+let workspaceUserId = null;
+const batchStorageKey = () => state.session?.user?.id ? `clipflow.batchId:${state.session.user.id}` : null;
+function announceAccountChange() {
+  try { localStorage.setItem(ACCOUNT_CHANGE_KEY, `${Date.now()}:${Math.random()}`); } catch { /* 忽略 */ }
+}
 
 /* ---------------------------------------------------------------- 小工具 */
 const fmtBytes = (n) => {
@@ -134,6 +140,7 @@ let sessionEndsAt = null;
 let loginPending = false;
 
 async function api(path, opts = {}) {
+  const requestEpoch = workspaceEpoch;
   // 每个请求都带超时：服务器/网络不响应时界面也能自己恢复，不会一直挂着
   const { timeoutMs = 20000, ...rest } = opts;
   const ctrl = new AbortController();
@@ -154,6 +161,7 @@ async function api(path, opts = {}) {
   } finally {
     clearTimeout(timer);
   }
+  if (requestEpoch !== workspaceEpoch) throw Object.assign(new Error('账号已切换，请重试'), { code: 'STALE_ACCOUNT' });
   if (res.status === 401) {
     showLogin('会话已过期，请重新登录');
     throw Object.assign(new Error('未登录或会话已过期'), { code: 'UNAUTHORIZED' });
@@ -161,14 +169,18 @@ async function api(path, opts = {}) {
   return res;
 }
 async function jsonApi(path, opts) {
+  const requestEpoch = workspaceEpoch;
   const res = await api(path, opts);
   const data = await res.json().catch(() => ({}));
+  if (requestEpoch !== workspaceEpoch) throw Object.assign(new Error('账号已切换，请重试'), { code: 'STALE_ACCOUNT' });
     if (res.status === 401) { showLogin('登录已过期，请重新登录'); }
     if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { status: res.status, data });
   return data;
 }
 
 function showLogin(message) {
+  if (workspaceUserId !== null) resetWorkspace();
+  state.session = { authenticated: false };
   stopPolling();
   el.appShell.hidden = true;
   // 兜底：登录按钮若残留 busy 状态会点不动，这里强制复位
@@ -250,6 +262,7 @@ async function bootstrap() {
 
 /* ---------------------------------------------------------------- 初始化 */
 async function init() {
+  activateWorkspace(state.session?.user?.id || null);
   state.config = await jsonApi('/api/config');
   el.buildTag.textContent = state.config.build || '';
   const exts = (state.config.allowedExtensions || []).map((e) => e.slice(1).toUpperCase()).join(' / ');
@@ -266,6 +279,56 @@ async function init() {
   await restore();
   await restoreHomeGeneration().catch(() => {});
 }
+
+function activateWorkspace(userId) {
+  const nextId = userId == null ? null : String(userId);
+  if (workspaceUserId === nextId) return;
+  resetWorkspace();
+  workspaceUserId = nextId;
+}
+
+function resetWorkspace() {
+  workspaceEpoch += 1;
+  workspaceUserId = null;
+  stopPolling();
+  clearInterval(state.tickTimer); state.tickTimer = null;
+  clearTimeout(assetRefreshTimer); assetRefreshTimer = null;
+  clearInterval(taskPollTimer); taskPollTimer = null;
+  state.items = []; state.batchId = null; state.batch = null; state.rows = [];
+  state.syncing = false; state.tab = 'link';
+  state.openKey = null; state.downloading.clear(); state.selected.clear();
+  state.tabBatch = { link: null, erase: null, enhance: null, transcode: null };
+  state.linkTasks = [];
+  assetList = []; assetSel = new Set(); taskListData = [];
+  clearReferenceFiles();
+  generationMonitorToken += 1;
+  generationBusy = false;
+  clearGenerationPreview();
+  for (const selector of ['#assetGrid', '#taskList', '#list', '#homeRecent', '#toolRecent', '#referencePreviews']) {
+    const node = document.querySelector(selector);
+    if (!node) continue;
+    node.querySelectorAll('video,audio').forEach((media) => { media.pause(); media.removeAttribute('src'); media.load(); });
+    node.replaceChildren();
+  }
+  if (el.assetTotal) el.assetTotal.textContent = '0 项';
+  if (el.taskTotal) el.taskTotal.textContent = '0 项';
+  if (el.batchCard) el.batchCard.hidden = true;
+  if (el.fileInput) el.fileInput.value = '';
+  if (el.linkInputs) el.linkInputs.value = '';
+  if (homeCmd) homeCmd.value = '';
+  if (referenceInput) referenceInput.value = '';
+  if (el.adminMask) el.adminMask.hidden = true;
+  if (el.settingsMenu) el.settingsMenu.hidden = true;
+  state.config = null;
+}
+
+window.addEventListener('storage', (event) => {
+  if (event.key !== ACCOUNT_CHANGE_KEY) return;
+  resetWorkspace();
+  state.session = { authenticated: false };
+  showLogin();
+  bootstrap();
+});
 
 /* ============================================================================
  * 上传阶段：时长 → MD5 → 秒传预检 → 上传
@@ -496,7 +559,7 @@ async function ensureBatch() {
       : await jsonApi('/api/batches', { method: 'POST', timeoutMs: 600000, body: JSON.stringify({ fileIds, durations, ...tabPayload() }) });
     if (!state.batchId) {
       state.batchId = data.batch.id;
-      try { localStorage.setItem(STORE_KEY, state.batchId); } catch { /* 忽略 */ }
+      try { const key = batchStorageKey(); if (key) localStorage.setItem(key, state.batchId); } catch { /* 忽略 */ }
     }
     ready.forEach((it) => { it.added = true; });   // 已并入批次 → 之后由服务端行渲染
     applyBatch(data);
@@ -796,6 +859,8 @@ function panelNode(r) {
   const uploading = r.status === 'uploading' || r.status === 'upload-failed';
   // 统一走服务器副本（不再用云端直连地址）
   const targetSrc = r.previewUrl || '';
+  const sourceCompareSrc = r.fileId ? `/f/${r.fileId}` : r.sourceUrl || '';
+  const compareReady = done && !r.result?.srt && targetSrc && sourceCompareSrc && !UNPLAYABLE_EXT.has(extOf(r.fileName));
 
   const srcBody = uploading
     ? `<div class="state"><div class="glyph ${r.status === 'upload-failed' ? 'bad' : 'spin'}"></div>
@@ -842,12 +907,28 @@ function panelNode(r) {
   const srcExpiry = r.sourceExpiresAt
     ? new Date(r.sourceExpiresAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
     : '—';
+  const comparison = compareReady ? `
+    <div class="video-compare-wrap">
+      <div class="video-compare" data-split="50" aria-label="处理前后视频对比">
+        <video class="compare-source" preload="metadata" playsinline src="${escapeHtml(sourceCompareSrc)}"></video>
+        <div class="compare-result-clip"><video class="compare-result" preload="metadata" playsinline muted src="${escapeHtml(targetSrc)}"></video></div>
+        <span class="compare-label compare-label-before">处理前</span><span class="compare-label compare-label-after">处理后</span>
+        <div class="compare-divider" role="slider" tabindex="0" aria-label="前后画面分界线" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"><span></span></div>
+      </div>
+      <div class="compare-controls">
+        <button class="btn btn-ghost btn-sm compare-play" type="button" aria-label="播放">▶</button>
+        <span class="compare-time">00:00</span>
+        <input class="compare-seek" type="range" min="0" max="1000" value="0" aria-label="播放进度">
+        <span class="compare-duration">--:--</span>
+      </div>
+    </div>
+    <div class="compare-expiry"><span class="expiry-chip">源文件有效期至 ${srcExpiry}</span><span class="expiry-chip">产物与源文件一同在 ${state.config?.uploadTtlHours ?? 12} 小时后清理</span></div>` : '';
   wrap.innerHTML = `
     <div class="panel-head">
       <span class="panel-title">对比预览 · <b>${escapeHtml(r.fileName)}</b></span>
       <button class="btn btn-ghost btn-sm" type="button">收起预览</button>
     </div>
-    <div class="preview-pair">
+    ${compareReady ? comparison : `<div class="preview-pair">
       <div class="preview-item">
         <div class="panel-cap">源视频</div>
         <figure class="preview">${srcBody}</figure>
@@ -858,8 +939,9 @@ function panelNode(r) {
         <figure class="preview">${tgtBody}</figure>
         <div class="expiry-row">${done ? `<span class="expiry-chip">产物与源文件一同在 ${state.config?.uploadTtlHours ?? 12} 小时后清理</span>` : ''}</div>
       </div>
-    </div>`;
+    </div>`}`;
   wrap.querySelector('.panel-head .btn').onclick = () => togglePreview(r.key);
+  if (compareReady) bindVideoCompare(wrap);
   // 播放失败（编码不支持、链接过期、文件被清）→ 换成说明 + 下载入口，不留死播放器
   wrap.querySelectorAll('video').forEach((v) => {
     const swap = () => {
@@ -871,6 +953,71 @@ function panelNode(r) {
     if (v.error) swap();
   });
   return wrap;
+}
+
+function bindVideoCompare(wrap) {
+  const stage = wrap.querySelector('.video-compare');
+  const divider = wrap.querySelector('.compare-divider');
+  const before = wrap.querySelector('.compare-source');
+  const after = wrap.querySelector('.compare-result');
+  const play = wrap.querySelector('.compare-play');
+  const seek = wrap.querySelector('.compare-seek');
+  const time = wrap.querySelector('.compare-time');
+  const duration = wrap.querySelector('.compare-duration');
+  if (!stage || !divider || !before || !after) return;
+  const timecode = (value) => {
+    const total = Math.max(0, Math.floor(Number(value) || 0));
+    return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+  };
+  const setSplit = (value) => {
+    const split = Math.max(0, Math.min(100, Number(value) || 0));
+    stage.dataset.split = String(split);
+    stage.style.setProperty('--compare-split', `${split}%`);
+    divider.style.left = `${split}%`;
+    divider.setAttribute('aria-valuenow', String(Math.round(split)));
+  };
+  const seekDivider = (event) => {
+    const rect = stage.getBoundingClientRect();
+    setSplit(((event.clientX - rect.left) / rect.width) * 100);
+  };
+  let dragging = false;
+  divider.addEventListener('pointerdown', (event) => {
+    dragging = true; divider.setPointerCapture?.(event.pointerId); seekDivider(event); event.preventDefault();
+  });
+  divider.addEventListener('pointermove', (event) => { if (dragging) seekDivider(event); });
+  divider.addEventListener('pointerup', () => { dragging = false; });
+  divider.addEventListener('pointercancel', () => { dragging = false; });
+  divider.addEventListener('keydown', (event) => {
+    const split = Number(stage.dataset.split) || 50;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') { setSplit(split - 2); event.preventDefault(); }
+    else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') { setSplit(split + 2); event.preventDefault(); }
+    else if (event.key === 'Home') { setSplit(0); event.preventDefault(); }
+    else if (event.key === 'End') { setSplit(100); event.preventDefault(); }
+  });
+  const syncTime = () => {
+    if (Number.isFinite(before.currentTime) && Number.isFinite(after.duration) && after.duration > 0) {
+      const targetTime = Math.min(before.currentTime, after.duration);
+      if (Math.abs(after.currentTime - targetTime) > 0.18) after.currentTime = targetTime;
+    }
+  };
+  before.addEventListener('loadedmetadata', () => { if (Number.isFinite(before.duration)) duration.textContent = timecode(before.duration); });
+  after.addEventListener('loadedmetadata', () => {
+    if (Number.isFinite(before.duration)) duration.textContent = timecode(before.duration);
+    syncTime();
+  });
+  before.addEventListener('timeupdate', () => {
+    syncTime();
+    time.textContent = timecode(before.currentTime);
+    if (Number.isFinite(before.duration) && before.duration > 0) seek.value = String(Math.round(before.currentTime / before.duration * 1000));
+  });
+  before.addEventListener('play', () => { after.play().catch(() => {}); play.textContent = '❚❚'; play.setAttribute('aria-label', '暂停'); });
+  before.addEventListener('pause', () => { after.pause(); play.textContent = '▶'; play.setAttribute('aria-label', '播放'); });
+  before.addEventListener('seeking', syncTime);
+  play.addEventListener('click', () => before.paused ? before.play().catch(() => {}) : before.pause());
+  seek.addEventListener('input', () => {
+    if (Number.isFinite(before.duration) && before.duration > 0) before.currentTime = before.duration * Number(seek.value) / 1000;
+  });
+  setSplit(50);
 }
 
 function renderSummary(rows) {
@@ -1249,7 +1396,7 @@ function rowDownloadButton(r) {
 }
 
 /* ---------------------------------------------------------------- 刷新恢复 */
-function clearSaved() { try { localStorage.removeItem(STORE_KEY); } catch { /* 忽略 */ } }
+function clearSaved() { try { const key = batchStorageKey(); if (key) localStorage.removeItem(key); } catch { /* 忽略 */ } }
 function tabForBatch(data) {
   const operation = data?.batch?.operation;
   if (operation === 'enhance' || operation === 'asr-subtitles' || operation === 'transcode') {
@@ -1260,11 +1407,14 @@ function tabForBatch(data) {
   return 'erase';
 }
 async function restore() {
+  const requestEpoch = workspaceEpoch;
+  let savedKey = null;
   let batchId = null;
-  try { batchId = localStorage.getItem(STORE_KEY); } catch { /* 忽略 */ }
+  try { savedKey = batchStorageKey(); if (savedKey) batchId = localStorage.getItem(savedKey); } catch { /* 忽略 */ }
   if (!batchId) return;
   try {
     const data = await jsonApi(`/api/batches/${batchId}`);
+    if (requestEpoch !== workspaceEpoch) return;
     const tab = tabForBatch(data);
     state.tabBatch[tab] = batchId;
     if (tab !== state.tab) await setTab(tab);
@@ -1276,7 +1426,8 @@ async function restore() {
     }
     toast('已恢复上次的任务批次');
   } catch {
-    clearSaved();
+    if (requestEpoch !== workspaceEpoch) return;
+    try { if (savedKey) localStorage.removeItem(savedKey); } catch { /* 忽略 */ }
   }
 }
 
@@ -1333,6 +1484,7 @@ async function restore() {
       if (el.confirmInput) el.confirmInput.value = '';
       sessionEndsAt = Date.parse(data.expiresAt);
       state.session = data;
+      announceAccountChange();
       showApp();
       await init();
       refreshHeader();
@@ -1541,6 +1693,7 @@ el.logoutBtn.addEventListener('click', async () => {
   try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }); } catch { /* 忽略 */ }
   sessionEndsAt = null;
   state.session = { authenticated: false };
+  announceAccountChange();
   showLogin();
     clearBusy(el.logoutBtn);   // 复位按钮，否则下次登录后仍显示「正在退出…」
 });
@@ -1609,8 +1762,9 @@ async function setTab(tab) {
     catch { state.batchId = null; clearSaved(); }
   }
   try {
-    if (state.batchId) localStorage.setItem(STORE_KEY, state.batchId);
-    else localStorage.removeItem(STORE_KEY);
+    const key = batchStorageKey();
+    if (key && state.batchId) localStorage.setItem(key, state.batchId);
+    else if (key) localStorage.removeItem(key);
   } catch { /* 忽略 */ }
   render();
 }
@@ -1621,10 +1775,10 @@ async function setTab(tab) {
  */
 async function addLinkBatch() {
   const raw = String(el.linkInputs?.value || '');
-  const urls = [...new Set(raw.split(/[\s,，]+/).map((x) => x.trim()).filter(Boolean))];
+  const urls = raw.match(/https?:\/\/[^\s<>\"']+/gi) || [];
   if (el.linkNotice) el.linkNotice.hidden = true;
   if (!urls.length) {
-    if (el.linkNotice) { el.linkNotice.textContent = '请先粘贴至少一个视频直链（每行一个）'; el.linkNotice.hidden = false; }
+    if (el.linkNotice) { el.linkNotice.textContent = '请粘贴视频链接或抖音分享文案'; el.linkNotice.hidden = false; }
     return;
   }
   if (!markBusy(el.linkAdd, '正在解析…')) return;
@@ -1633,7 +1787,7 @@ async function addLinkBatch() {
     el.linkInputs.value = '';
     state.tabBatch.link = res.batch.id;
     state.batchId = res.batch.id;
-    try { localStorage.setItem(STORE_KEY, state.batchId); } catch { /* 忽略 */ }
+    try { const key = batchStorageKey(); if (key) localStorage.setItem(key, state.batchId); } catch { /* 忽略 */ }
     applyBatch(res);
     // 新添加的链接默认全部勾选，方便直接点「批量开始」
     const fresh = viewRows().filter((r) => r.status === 'idle');
@@ -1691,10 +1845,12 @@ async function redeemPrompt() {
 }
 
 async function refreshHeader() {
+  const requestEpoch = workspaceEpoch;
   try {
     const res = await fetch('/api/auth/session', { credentials: 'same-origin' });
     if (res.ok === false) return;        // 仅明确失败（5xx/网关）才跳过：保持现状，不要当成已登出
     const d = await res.json();
+    if (requestEpoch !== workspaceEpoch) return;
     if (!d.authenticated) {
       if (el.adminBtn) el.adminBtn.hidden = true;
       if (state.session.authenticated) showLogin('会话已过期，请重新登录');
@@ -1702,7 +1858,14 @@ async function refreshHeader() {
       sessionEndsAt = null;
       return;
     }
+    const priorUserId = state.session?.user?.id || null;
     state.session = d;
+    if (priorUserId && d.user?.id && String(priorUserId) !== String(d.user.id)) {
+      activateWorkspace(d.user.id);
+      showApp();
+      await init();
+      return;
+    }
     sessionEndsAt = Date.parse(d.expiresAt);
     const u = d.user;
     if (!u) return;
@@ -1744,15 +1907,22 @@ function switchPage(page) {
   }
 }
 
+let assetRefreshTimer = null;
 let assetSearch = '';
 let assetSel = new Set();
 
 async function loadAssets() {
   if (!el.assetGrid) return;
+  const requestEpoch = workspaceEpoch;
   try {
     const data = await jsonApi('/api/assets');
+    if (requestEpoch !== workspaceEpoch) return;
     assetList = data.assets || [];
+    assetSel = new Set([...assetSel].filter((id) => assetList.some((asset) => asset.id === id)));
+    clearTimeout(assetRefreshTimer);
+    if (assetList.some((asset) => asset.state === 'saving') && !document.getElementById('pageAssets')?.hidden) assetRefreshTimer = setTimeout(loadAssets, 2500);
   } catch (err) {
+    if (requestEpoch !== workspaceEpoch) return;
     assetList = [];
     toast(`资产加载失败：${err.message}`);
   }
@@ -1761,7 +1931,7 @@ async function loadAssets() {
 }
 
 function assetKindLabel(kind) {
-  return ({ video: '视频', text: '文案', image: '图片', audio: '音频' })[kind] || kind;
+  return ({ video: '视频', text: '文本', image: '图片', audio: '音频' })[kind] || kind;
 }
 function assetMatches(a) {
   if (assetKind !== 'all' && a.kind !== assetKind) return false;
@@ -1774,7 +1944,6 @@ function renderAssetFilters() {
   const kinds = ['all', 'video', 'image', 'audio', 'text'];
   el.assetFilters.innerHTML = kinds.map((k) => {
     const n = k === 'all' ? assetList.length : assetList.filter((a) => a.kind === k).length;
-    if (k !== 'all' && n === 0) return '';
     return `<button class="cchip ${assetKind === k ? 'on' : ''}" type="button" data-kind="${k}">${k === 'all' ? '全部' : assetKindLabel(k)} <span class="cnt">${n}</span></button>`;
   }).join('');
 }
@@ -1791,34 +1960,38 @@ function renderAssets() {
   for (const a of list) {
     const card = document.createElement('div');
     card.className = 'asset' + (assetSel.has(a.id) ? ' sel' : '');
-    const thumb = a.thumbUrl
-      ? `<img src="${a.thumbUrl}" alt="" loading="lazy" onerror="this.style.display='none'" />`
-      : ASSET_ICON[a.kind] || '▶';
+    const thumb = a.kind === 'image' && a.state === 'ready'
+      ? `<img src="${escapeHtml(a.url)}" alt="" loading="lazy" />`
+      : a.kind === 'video' && a.state === 'ready'
+        ? `<video src="${escapeHtml(a.url)}" preload="metadata" controls playsinline></video>`
+        : a.kind === 'audio' && a.state === 'ready'
+          ? `<audio src="${escapeHtml(a.url)}" preload="none" controls></audio>`
+          : a.kind === 'text' && a.text ? `<p class="asset-text-preview">${escapeHtml(a.text)}</p>` : ASSET_ICON[a.kind] || '▶';
+    const origin = ({upload:'上传', generation:'生成', prompt:'提示词', process:'处理'})[a.source] || '素材';
+    const status = a.state === 'saving' ? '正在保存…' : a.state === 'failed' ? '保存失败，可重新加载重试' : '已保存';
     card.innerHTML = `
-      <div class="a-thumb">${thumb}<span class="a-badge">${a.source === 'upload' ? '上传' : '处理'}</span>
+      <div class="a-thumb">${thumb}<span class="a-badge">${origin}</span>
         <span class="a-kind">${assetKindLabel(a.kind)}</span>
         <span class="a-check ${assetSel.has(a.id) ? 'on' : ''}"></span></div>
       <div class="a-name" title="${escapeHtml(a.name || '')}">${escapeHtml(a.name || '')}</div>
-      <div class="a-meta">${a.kind === 'text' ? '字幕/文稿' : (a.remote ? '云端保存' : '本地保存')}${a.sizeText ? ' · ' + a.sizeText : ''}</div>
+      <div class="a-meta" title="${escapeHtml(a.error || '')}">${escapeHtml(status)}${a.sizeText ? ' · ' + a.sizeText : ''}</div>
       <div class="a-date">${a.createdAt ? new Date(a.createdAt).toLocaleString('zh-CN', { hour12: false }) : ''}</div>
       <div class="a-acts"></div>`;
-    card.querySelector('.a-thumb').addEventListener('click', () => toggleAssetSel(a.id));
+    card.querySelector('.a-thumb').addEventListener('click', (event) => {
+      if (!event.target.closest('video,audio')) toggleAssetSel(a.id);
+    });
     const acts = card.querySelector('.a-acts');
-    if (a.downloadUrl) {
+    if (a.state === 'ready') {
       const link = document.createElement('a');
       link.href = a.downloadUrl; link.textContent = '下载'; link.download = '';
       acts.appendChild(link);
-    } else if (a.url) {
-      const link = document.createElement('a');
-      link.href = a.url; link.textContent = '下载'; link.download = ''; link.target = '_blank';
-      acts.appendChild(link);
+      const use = document.createElement('button'); use.type = 'button';
+      use.textContent = a.kind === 'text' ? '使用提示词' : '加入参考';
+      use.addEventListener('click', () => addAssetToCreation(a)); acts.appendChild(use);
     }
-    if (a.source === 'upload' && a.fileId) {
-      const del = document.createElement('button');
-      del.type = 'button'; del.textContent = '删除';
-      del.addEventListener('click', (e) => { e.stopPropagation(); deleteAssets([a]); });
-      acts.appendChild(del);
-    }
+    const del = document.createElement('button'); del.type = 'button'; del.textContent = '删除';
+    del.disabled = a.state === 'saving';
+    del.addEventListener('click', () => deleteAssets([a])); acts.appendChild(del);
     el.assetGrid.appendChild(card);
   }
   if (el.assetBulk) el.assetBulk.hidden = list.length === 0;
@@ -1840,18 +2013,57 @@ function updateAssetSel() {
 }
 
 async function deleteAssets(items) {
-  const removable = items.filter((a) => a.source === 'upload' && a.fileId);
-  const skipped = items.length - removable.length;
-  if (!removable.length) { toast('选中的是处理产物，暂不支持删除'); return; }
-  if (!confirm(`删除 ${removable.length} 个上传素材？仍被任务引用的会保留。${skipped ? `（${skipped} 个产物跳过）` : ''}`)) return;
+  if (!items.length || !confirm(`删除这 ${items.length} 项资产？删除后无法恢复。`)) return;
   let ok = 0;
-  for (const a of removable) {
-    try { await jsonApi(`/api/files/${a.fileId}`, { method: 'DELETE' }); ok += 1; assetSel.delete(a.id); }
-    catch { /* 被引用，保留 */ }
+  const errors = [];
+  for (const asset of items) {
+    try {
+      await jsonApi(`/api/assets/${encodeURIComponent(asset.id)}`, { method: 'DELETE' });
+      ok += 1; assetSel.delete(asset.id);
+    } catch (err) { errors.push(err.message); }
   }
-  toast(`已删除 ${ok} 个${skipped ? `，跳过 ${skipped} 个` : ''}`);
+  toast(`已删除 ${ok} 项${errors.length ? `；${errors[0]}` : ''}`);
   await loadAssets();
 }
+
+async function addAssetToCreation(asset) {
+  if (generationBusy) { toast('请等待当前生成任务完成'); return; }
+  try {
+    if (asset.kind !== 'text' && referenceFiles.length >= (currentGenerationMode() === 'keyframes' ? 2 : 9)) {
+      toast('参考素材数量已达上限，请先移除部分参考'); return;
+    }
+    const data = await jsonApi(`/api/assets/${encodeURIComponent(asset.id)}/reference`, { method: 'POST', body: '{}' });
+    if (data.text !== undefined) {
+      homeCmd.value = data.text;
+      homeCmd.dispatchEvent(new Event('input'));
+    } else {
+      const ref = data.reference;
+      if (currentGenerationMode() === 'text') { generationModeSelect.value = 'multi_image'; syncGenerationMode(); }
+      referenceFiles.push({ id: nextReferenceId(), referenceId: ref.id, kind: ref.kind,
+        file: { name: ref.name, size: ref.size, type: ref.mime }, url: ref.localUrl });
+      renderReferencePreviews();
+    }
+    switchPage('home'); window.scrollTo({ top: 0, behavior: 'smooth' });
+    toast(asset.kind === 'text' ? '提示词已填入创作区' : asset.kind === 'image' ? '已添加到创作参考' : '已添加到参考区；当前生成模型仅支持图片参考');
+  } catch (err) { toast(err.message); }
+}
+
+document.getElementById('assetUpload')?.addEventListener('change', async (event) => {
+  const files = Array.from(event.target.files || []);
+  event.target.disabled = true;
+  let count = 0;
+  try {
+    for (const file of files) {
+      const response = await fetch('/api/video-references', { method: 'POST', credentials: 'same-origin',
+        headers: { 'x-file-name': encodeURIComponent(file.name), 'content-type': file.type || 'application/octet-stream' }, body: file });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '上传失败');
+      count += 1;
+    }
+    toast(`已保存 ${count} 项素材`);
+  } catch (err) { toast(`已保存 ${count} 项；${err.message}`); }
+  finally { event.target.value = ''; event.target.disabled = false; await loadAssets(); }
+});
 
 if (el.assetSearch) {
   el.assetSearch.addEventListener('input', () => { assetSearch = el.assetSearch.value.trim(); renderAssets(); });
@@ -2044,12 +2256,13 @@ function renderReferencePreviews() {
     const card = document.createElement('div');
     card.className = `reference-preview-item is-${item.kind}`;
     card.title = item.file.name;
-    const img = document.createElement('img');
-    img.src = item.url; img.alt = '';
-    card.appendChild(img);
+    const media = document.createElement(item.kind === 'video' ? 'video' : item.kind === 'audio' ? 'span' : 'img');
+    if (item.kind === 'audio') { media.className = 'reference-audio-glyph'; media.textContent = '♫'; }
+    else { media.src = item.url; media.preload = 'metadata'; }
+    card.appendChild(media);
     const label = document.createElement('span');
     label.className = 'reference-preview-label';
-    label.textContent = mode === 'keyframes' ? (index === 0 ? '首帧' : '尾帧') : `参考图 ${index + 1}`;
+    label.textContent = mode === 'keyframes' ? (index === 0 ? '首帧' : '尾帧') : `${({image:'图片',video:'视频',audio:'音频'})[item.kind]} ${index + 1}`;
     card.appendChild(label);
     const remove = document.createElement('button');
     remove.type = 'button'; remove.className = 'reference-preview-remove'; remove.dataset.referenceId = item.id;
@@ -2065,12 +2278,14 @@ if (referenceInput) {
     const max = currentGenerationMode() === 'keyframes' ? 2 : 9;
     let rejected = 0;
     let added = 0;
+    const newItems = [];
     for (const file of incoming) {
       const kind = referenceKind(file);
       const duplicate = referenceFiles.some((item) => item.file.name === file.name && item.file.size === file.size && item.file.lastModified === file.lastModified);
       if (!kind || duplicate || referenceFiles.length >= max) { rejected += 1; continue; }
       try {
-        referenceFiles.push({ id: nextReferenceId(), kind, file, url: URL.createObjectURL(file) });
+        const item = { id: nextReferenceId(), kind, file, url: URL.createObjectURL(file) };
+        referenceFiles.push(item); newItems.push(item);
         added += 1;
       } catch {
         rejected += 1;
@@ -2078,7 +2293,12 @@ if (referenceInput) {
     }
     referenceInput.value = '';
     renderReferencePreviews();
-    if (added) toast(`已添加 ${added} 张参考图片`);
+    for (const item of newItems) {
+      item.uploadPromise = uploadVideoReference(item, 0, 1, { silent: true })
+        .then(() => { if (!document.getElementById('pageAssets')?.hidden) loadAssets(); })
+        .catch((err) => { toast(`参考图片保存失败：${err.message}`); });
+    }
+    if (added) toast(`已添加 ${added} 张参考图片，正在保存到资产`);
     if (rejected) toast(`已跳过 ${rejected} 张重复、格式不支持或超过数量限制的图片`);
   });
 }
@@ -2097,7 +2317,7 @@ referencePreviewList?.addEventListener('click', (event) => {
 });
 
 function firstResultUrl(value) {
-  if (typeof value === 'string' && /^https?:\/\//i.test(value)) return value;
+  if (typeof value === 'string' && (/^https?:\/\//i.test(value) || value.startsWith('/api/assets/'))) return value;
   if (Array.isArray(value)) {
     for (const item of value) { const found = firstResultUrl(item); if (found) return found; }
   } else if (value && typeof value === 'object') {
@@ -2107,6 +2327,7 @@ function firstResultUrl(value) {
 }
 
 const ACTIVE_GENERATION_STATES = new Set(['SUBMITTING', 'QUEUED', 'RUNNING']);
+let currentHomeGeneration = null;
 let generationBusy = false;
 let generationMonitorToken = 0;
 syncGenerationMode();
@@ -2155,8 +2376,11 @@ function generationFailureMessage(generation) {
 
 function renderGenerationPreview(generation) {
   if (!generationPreview || !generation) return;
+  currentHomeGeneration = generation;
   const status = String(generation.status || 'QUEUED').toUpperCase();
   const active = ACTIVE_GENERATION_STATES.has(status);
+  const deleteButton = document.getElementById('generationDelete');
+  if (deleteButton) deleteButton.hidden = active;
   const failed = ['FAILED', 'ERROR', 'CANCELED', 'CANCELLED'].includes(status);
   const canceled = ['CANCELED', 'CANCELLED'].includes(status);
   const rawProgress = generation.estimatedProgress;
@@ -2200,13 +2424,14 @@ function renderGenerationPreview(generation) {
         : '当前接口不返回精确百分比，进度为根据任务状态与已耗时计算的预计值。';
   }
   if (resultUrl && generationVideo) {
-    if (generationVideo.src !== resultUrl) generationVideo.src = resultUrl;
+    if (generationVideo.getAttribute('src') !== resultUrl) generationVideo.src = resultUrl;
     generationVideo.hidden = false;
     if (generationPreviewEmpty) generationPreviewEmpty.hidden = true;
   } else {
     if (generationVideo) {
+      generationVideo.pause();
       generationVideo.hidden = true;
-      if (status !== 'SUCCESS') generationVideo.removeAttribute('src');
+      if (generationVideo.hasAttribute('src')) { generationVideo.removeAttribute('src'); generationVideo.load(); }
     }
     if (generationPreviewEmpty) generationPreviewEmpty.hidden = false;
   }
@@ -2226,9 +2451,13 @@ async function monitorGeneration(initial) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
     if (token !== generationMonitorToken) return;
     try {
-      generation = await jsonApi(`/api/video-generations/${encodeURIComponent(generation.taskId)}`, { timeoutMs: 35_000 });
+      const data = await jsonApi('/api/video-generations/current', { timeoutMs: 35_000 });
+      if (token !== generationMonitorToken) return;
+      if (!data.generation) { clearGenerationPreview(); return; }
+      generation = data.generation;
       renderGenerationPreview(generation);
     } catch (err) {
+      if (token !== generationMonitorToken) return;
       if (generationStageDetail) generationStageDetail.textContent = `暂时无法更新进度，正在自动重试：${err.message}`;
       continue;
     }
@@ -2239,9 +2468,33 @@ async function monitorGeneration(initial) {
   else toast(generationStatusText(String(generation.status).toUpperCase()));
 }
 
+function clearGenerationPreview() {
+  currentHomeGeneration = null;
+  generationVideo?.pause(); generationVideo?.removeAttribute('src'); generationVideo?.load();
+  if (generationPreview) generationPreview.hidden = true;
+  setGenerationLocked(false); syncGenerationMode();
+}
+
+document.getElementById('generationDelete')?.addEventListener('click', async (event) => {
+  if (generationBusy) return;
+  event.target.disabled = true;
+  setGenerationLocked(true);
+  try {
+    if (currentHomeGeneration?.taskId) await jsonApi(`/api/video-generations/${encodeURIComponent(currentHomeGeneration.taskId)}`, { method: 'DELETE' });
+    generationMonitorToken += 1; clearGenerationPreview();
+    toast('任务已删除，素材保留在资产中');
+  } catch (err) { toast(err.message); }
+  finally { event.target.disabled = false; setGenerationLocked(false); syncGenerationMode(); }
+});
+
 async function restoreHomeGeneration() {
+  const token = ++generationMonitorToken;
   const data = await jsonApi('/api/video-generations/current', { timeoutMs: 35_000 });
-  if (!data.generation) return;
+  if (token !== generationMonitorToken) return;
+  if (!data.generation) {
+    clearGenerationPreview();
+    return;
+  }
   if (ACTIVE_GENERATION_STATES.has(String(data.generation.status || '').toUpperCase())) {
     monitorGeneration(data.generation);
   } else {
@@ -2250,10 +2503,17 @@ async function restoreHomeGeneration() {
   }
 }
 
-async function uploadVideoReference(item, index, total) {
-  if (generationStageLabel) generationStageLabel.textContent = '正在上传参考素材';
-  if (generationStageDetail) generationStageDetail.textContent = `正在上传第 ${index + 1} / ${total} 个文件：${item.file.name}`;
-  if (generationProgressTitle) generationProgressTitle.textContent = '正在上传参考素材';
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && !generationBusy && el.authGate.hidden) restoreHomeGeneration().catch(() => {});
+});
+
+async function uploadVideoReference(item, index, total, { silent = false } = {}) {
+  if (item.referenceId) return { id: item.referenceId };
+  if (!silent) {
+    if (generationStageLabel) generationStageLabel.textContent = '正在上传参考素材';
+    if (generationStageDetail) generationStageDetail.textContent = `正在上传第 ${index + 1} / ${total} 个文件：${item.file.name}`;
+    if (generationProgressTitle) generationProgressTitle.textContent = '正在上传参考素材';
+  }
   const response = await fetch('/api/video-references', {
     method: 'POST',
     credentials: 'same-origin',
@@ -2266,6 +2526,7 @@ async function uploadVideoReference(item, index, total) {
   const data = await response.json().catch(() => ({}));
   if (response.status === 401) showLogin('会话已过期，请重新登录');
   if (!response.ok) throw Object.assign(new Error(data.error || `参考素材上传失败（HTTP ${response.status}）`), { status: response.status, data });
+  item.referenceId = data.reference.id;
   return data.reference;
 }
 
@@ -2281,6 +2542,7 @@ async function runHomeCommand() {
     return;
   }
   const mode = currentGenerationMode();
+  if (referenceFiles.some((item) => item.kind !== 'image')) { toast('当前生成接口仅接受图片参考，请移除视频和音频后生成'); return; }
   if (mode === 'text' && referenceFiles.length) {
     toast('文生视频不需要参考图片，请移除图片后再提交');
     return;
@@ -2316,12 +2578,14 @@ async function runHomeCommand() {
     mode,
     results: [],
   };
+  generationMonitorToken += 1;
   setGenerationLocked(true);
   renderGenerationPreview(submitting);
   if (status) status.textContent = '正在提交生成任务…';
   try {
     const uploadedReferences = [];
     for (let index = 0; index < referenceFiles.length; index += 1) {
+      if (referenceFiles[index].uploadPromise) await referenceFiles[index].uploadPromise;
       uploadedReferences.push(await uploadVideoReference(referenceFiles[index], index, referenceFiles.length));
       const uploadProgress = 4 + Math.round(((index + 1) / referenceFiles.length) * 8);
       if (generationProgressBar) generationProgressBar.style.width = `${uploadProgress}%`;
@@ -2350,6 +2614,7 @@ async function runHomeCommand() {
     if (status) status.textContent = `提交失败：${err.message}`;
     renderGenerationPreview({
       ...submitting,
+      ...err.data?.generation,
       status: 'FAILED',
       estimatedProgress: null,
       failureStage: err.data?.stage || 'submission',
@@ -2417,10 +2682,13 @@ function taskStatusText(t) {
 
 async function loadTasks() {
   if (!el.taskList) return;
+  const requestEpoch = workspaceEpoch;
   try {
     const data = await jsonApi('/api/tasks');
+    if (requestEpoch !== workspaceEpoch) return;
     taskListData = data.tasks || [];
   } catch (err) {
+    if (requestEpoch !== workspaceEpoch) return;
     taskListData = [];
     toast(`任务加载失败：${err.message}`);
   }

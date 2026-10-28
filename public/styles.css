@@ -615,6 +615,35 @@ main.container { padding-bottom: 64px; }
 }
 .panel .preview > video { display: block; object-fit: contain; }
 
+/* 前后对比滑块：两段视频同步播放，拖动分隔线查看处理前后。 */
+.video-compare-wrap { width: 100%; overflow: hidden; border-radius: var(--r-md); background: #0f1115; }
+.video-compare { --compare-split: 50%; position: relative; width: 100%; aspect-ratio: 16 / 9; max-height: 560px; overflow: hidden; background: #0f1115; touch-action: pan-y; }
+.video-compare > video, .compare-result-clip { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+.video-compare > video { object-fit: contain; background: #0f1115; }
+.compare-result-clip { z-index: 2; overflow: hidden; clip-path: inset(0 0 0 var(--compare-split)); pointer-events: none; }
+.compare-result-clip video { display: block; width: 100%; height: 100%; object-fit: contain; background: #0f1115; }
+.compare-label { position: absolute; z-index: 3; top: 16px; padding: 7px 11px; border: 1px solid rgba(255,255,255,.16); border-radius: 999px; background: rgba(10,10,12,.58); color: #fff; font-size: 11px; font-weight: 650; backdrop-filter: blur(8px); pointer-events: none; }
+.compare-label-before { left: 16px; }
+.compare-label-after { right: 16px; }
+.compare-divider { position: absolute; z-index: 4; top: 0; bottom: 0; left: 50%; width: 44px; display: flex; justify-content: center; transform: translateX(-50%); cursor: ew-resize; touch-action: none; outline: none; }
+.compare-divider::before { content: ""; position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(255,255,255,.95); box-shadow: 0 0 8px rgba(0,0,0,.5); }
+.compare-divider > span { position: absolute; top: 50%; width: 42px; height: 42px; display: grid; place-items: center; transform: translateY(-50%); border: 1px solid rgba(255,255,255,.7); border-radius: 50%; background: rgba(12,13,16,.78); box-shadow: 0 5px 18px rgba(0,0,0,.3); }
+.compare-divider > span::before { content: "‹  ›"; color: #fff; font-size: 17px; letter-spacing: 1px; white-space: nowrap; }
+.compare-divider:focus-visible > span { outline: 3px solid #fff; outline-offset: 3px; }
+.compare-controls { display: flex; align-items: center; gap: 11px; min-height: 48px; padding: 0 14px; color: #f5f5f7; background: #17181c; }
+.compare-controls .btn { min-width: 34px; padding-inline: 8px; color: #fff; border-color: rgba(255,255,255,.18); background: rgba(255,255,255,.08); }
+.compare-time, .compare-duration { min-width: 39px; color: #d6d6da; font: 500 11px/1 var(--mono); }
+.compare-duration { text-align: right; }
+.compare-seek { flex: 1; min-width: 50px; height: 4px; accent-color: #fff; cursor: pointer; }
+.compare-expiry { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+@media (max-width: 600px) {
+  .video-compare { max-height: 420px; }
+  .compare-label { top: 9px; padding: 5px 8px; font-size: 10px; }
+  .compare-label-before { left: 9px; }
+  .compare-label-after { right: 9px; }
+  .compare-controls { gap: 7px; padding: 0 9px; }
+}
+
 /* 目标视频面板里的进度（处理中的进度只出现在这里） */
 .tbar { width: min(320px, 78%); height: 6px; border-radius: 999px; background: #2b313b; overflow: hidden; }
 .tbar > span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--link), #6f9bff); transition: width .4s ease; }
@@ -1454,11 +1483,6 @@ body{background:var(--canvas)}
 .generation-preview-panel.is-failed .generation-progress-track i{background:#cf4c4c}
 .generation-progress-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;color:var(--ink-2);font-size:10.5px}
 .generation-progress-card>p{margin-top:22px;color:var(--ink-4);font-size:9.5px;line-height:1.55}
-.generation-preview-panel.is-busy~.creation-suggestions{opacity:.55;pointer-events:none}
-.creation-suggestions{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;margin:18px 0 0}
-.creation-suggestions>span{margin-right:2px;color:var(--ink-3);font-size:11.5px}
-.creation-suggestions button{height:32px;padding:0 13px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.72);color:var(--ink-2);font:inherit;font-size:11.5px;cursor:pointer;transition:.18s}
-.creation-suggestions button:hover{border-color:#c9c9cf;background:#fff;color:var(--ink);transform:translateY(-1px)}
 
 .inspiration-section{margin-top:76px;padding-top:34px;border-top:1px solid var(--line)}
 .inspiration-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px}
@@ -1520,8 +1544,6 @@ body{background:var(--canvas)}
   .generation-preview-panel{grid-template-columns:1fr;padding:10px;border-radius:20px}
   .generation-preview-stage{min-height:260px;border-radius:14px}
   .generation-progress-card{padding:14px 8px 10px}
-  .creation-suggestions{justify-content:flex-start}
-  .creation-suggestions>span{flex:1 0 100%}
   .inspiration-section{margin-top:56px;padding-top:28px}
   .inspiration-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
   .inspiration-card{min-height:260px;border-radius:15px}
@@ -1577,3 +1599,16 @@ body{background:var(--canvas)}
   #pageTools #linkCard #linkAdd{width:100%}
   #pageTools #batchCard{padding:18px 15px;border-radius:19px}
 }
+
+/* Persistent media library and completed generation controls. */
+.generation-result-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:20px}
+.generation-result-actions .btn{height:34px;padding:0 14px;font-size:12px}
+.asset-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.asset-upload{cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
+.asset .a-acts{position:static;display:flex;gap:6px;margin:0 10px 10px}
+.asset .a-acts button,.asset .a-acts a{min-height:32px;height:auto;padding:5px 3px}
+.asset .a-acts button:disabled{opacity:.45;cursor:wait}
+.asset .a-thumb video{width:100%;height:100%;max-height:220px;object-fit:contain;background:#161619}
+.asset .a-thumb audio{width:90%;max-width:100%;z-index:1}
+.asset-text-preview{padding:25px 18px;max-height:155px;overflow:hidden;font-size:13px;line-height:1.7;color:var(--ink-2);white-space:pre-wrap;overflow-wrap:anywhere}
+@media(max-width:640px){.asset-tools{width:100%}.asset-tools .search2{flex:1;min-width:120px}.generation-result-actions .btn{flex:1}}

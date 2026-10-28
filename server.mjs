@@ -19,6 +19,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import net from 'node:net';
 import dns from 'node:dns/promises';
+import { execFile } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { enhanceVideo, runAsr, toSrt, runTranscode, runOcr, runToolVideo } from './pipeline.mjs';
@@ -79,6 +80,7 @@ const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const OUTPUT_DIR = path.join(DATA_DIR, 'outputs');
 const REFERENCE_DIR = path.join(DATA_DIR, 'references');
+const ASSET_DIR = path.join(DATA_DIR, 'assets');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 
 const PORT = Number(process.env.PORT || 8787);
@@ -345,6 +347,18 @@ const MIME = {
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 fs.mkdirSync(REFERENCE_DIR, { recursive: true });
+fs.mkdirSync(ASSET_DIR, { recursive: true });
+
+// Cloud providers need short-lived anonymous access to source media. Keep the
+// capability signing key in the private data directory across restarts.
+const CAPABILITY_KEY_FILE = path.join(DATA_DIR, 'capability.key');
+let CAPABILITY_KEY;
+try { CAPABILITY_KEY = fs.readFileSync(CAPABILITY_KEY_FILE); }
+catch {
+  CAPABILITY_KEY = crypto.randomBytes(32);
+  fs.writeFileSync(CAPABILITY_KEY_FILE, CAPABILITY_KEY, { mode: 0o600, flag: 'wx' });
+}
+try { fs.chmodSync(CAPABILITY_KEY_FILE, 0o600); } catch { /* Windows/local FS */ }
 
 const db = { files: {}, tasks: {}, md5Index: {}, sessions: {} };
 try {
@@ -362,7 +376,15 @@ db.creditLedger ||= [];
 db.redemptionCodes ||= {};
 db.abuseEvents ||= [];
 db.videoGenerations ||= {};
+db.videoGenerationCurrent ||= {};
 db.references ||= {};
+db.assets ||= {};
+db.assetTombstones ||= {};
+// Asset references have independent lifetime; keep existing uploaded references available.
+for (const reference of Object.values(db.references)) {
+  reference.persistent = true;
+  reference.expiresAt = null;
+}
 // MD5 → fileId 索引（去重的唯一依据，文件名即 MD5）；旧记录没有 md5 字段，顺手补建索引
 // MD5 索引必须按账号隔离。物理 blob 仍可复用，但每个用户拥有独立的文件记录、
 // 文件名、过期时间和删除权限，避免跨账号秒传泄漏元数据或互相删除源文件。
@@ -443,8 +465,22 @@ function lanIp() {
 const LAN_IP = lanIp();
 /** 内网（或公网）可达地址；设置 PUBLIC_BASE_URL 可接入域名 / 反向代理 */
 const baseUrl = () => PUBLIC_BASE || `http://${LAN_IP}:${PORT}`;
-const publicFileUrl = (fileId) => `${baseUrl()}/f/${fileId}`;
-const publicReferenceUrl = (referenceId) => `${baseUrl()}/r/${referenceId}`;
+const capabilityUrlFor = (pathname) => {
+  const expires = Math.floor(Date.now() / 1000) + 6 * 60 * 60;
+  const signature = crypto.createHmac('sha256', CAPABILITY_KEY).update(`${pathname}\n${expires}`).digest('base64url');
+  return `${baseUrl()}${pathname}?expires=${expires}&signature=${signature}`;
+};
+function validCapabilityUrl(url) {
+  const expires = Number(url.searchParams.get('expires'));
+  const signature = url.searchParams.get('signature') || '';
+  if (!Number.isSafeInteger(expires) || expires < Math.floor(Date.now() / 1000) || expires > Math.floor(Date.now() / 1000) + 6 * 60 * 60 + 60) return false;
+  const expected = crypto.createHmac('sha256', CAPABILITY_KEY).update(`${url.pathname}\n${expires}`).digest();
+  let provided;
+  try { provided = Buffer.from(signature, 'base64url'); } catch { return false; }
+  return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
+}
+const publicFileUrl = (fileId) => capabilityUrlFor(`/f/${fileId}`);
+const publicReferenceUrl = (referenceId) => capabilityUrlFor(`/r/${referenceId}`);
 const publicDownloadUrl = (taskId) => `${baseUrl()}/api/download/${taskId}`;
 const publicPosterUrl = (taskId) => `${baseUrl()}/api/artifacts/${taskId}/poster.svg`;
 
@@ -637,6 +673,7 @@ async function sweepExpired(trigger = 'timer') {
     }
 
     for (const reference of Object.values(db.references)) {
+      if (reference.persistent) continue;
       if ((Date.parse(reference.expiresAt || 0) || 0) > now) continue;
       delete db.references[reference.id];
       await fsp.rm(path.join(DATA_DIR, reference.storedPath), { force: true });
@@ -949,6 +986,7 @@ async function handleUpload(req, res) {
     console.log(
       `[dedupe] ${digest} 已存在（${existing.id}），复用服务器文件，本次未占用新空间 ${formatBytes(received)}`,
     );
+    syncUserAssets(me.id);
     return sendJson(res, 200, {
       file: serializeFile(existing),
       deduped: true,
@@ -988,6 +1026,7 @@ async function handleUpload(req, res) {
     db.md5Index[indexKey] = fileId;
     saveDb();
     console.log(`[dedupe] ${digest} 复用物理 blob，为账号创建独立文件记录 ${fileId}`);
+    syncUserAssets(me.id);
     return sendJson(res, 200, { file: serializeFile(file), deduped: true, savedBytes: received, md5: digest });
   }
 
@@ -1020,6 +1059,7 @@ async function handleUpload(req, res) {
     `[upload] ${fileId} ${rawName} ${formatBytes(received)} in ${Date.now() - t0}ms` +
       ` md5=${digest}${declaredMd5 ? '（与客户端一致）' : ''} -> uploads/${digest}${ext}`,
   );
+  syncUserAssets(me.id);
   sendJson(res, 200, { file: serializeFile(file), deduped: false, md5: digest });
 }
 
@@ -1085,9 +1125,11 @@ async function handleReferenceUpload(req, res) {
     size: received,
     storedPath: path.relative(DATA_DIR, storedPath),
     createdAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + UPLOAD_TTL_MS).toISOString(),
+    expiresAt: null,
+    persistent: true,
   };
   db.references[referenceId] = reference;
+  registerReferenceAsset(reference);
   saveDb();
   console.log(`[reference] ${referenceId} ${kind} ${name} ${formatBytes(received)}`);
   sendJson(res, 201, { reference: serializeReference(reference) });
@@ -1211,6 +1253,15 @@ async function execute(task) {
     const srcPath = file ? path.join(DATA_DIR, file.storedPath) : null;
     const outDir = path.join(OUTPUT_DIR, task.id);
     await fsp.mkdir(outDir, { recursive: true });
+
+    if (task.sourcePlatform === 'douyin') {
+      task.stage = '正在保存中等码率视频'; task.stageKey = 'fetch'; task.progress = 60; saveDb();
+      await fsp.copyFile(srcPath, path.join(outDir, 'output.mp4'));
+      if (task.canceled) return;
+      const stat = await fsp.stat(path.join(outDir, 'output.mp4'));
+      finishTaskResult(task, { name: `${path.basename(task.fileName, '.mp4')}-标准版.mp4`, size: stat.size, hasVideo: true, remote: false });
+      return;
+    }
 
     // ---- 区域遮挡 / 消物（本地 ffmpeg，不依赖云端接口） ----
     if (task.operation === 'region-blur') {
@@ -1486,6 +1537,7 @@ async function execute(task) {
     task.etaSeconds = 0;
     recordRtf(task);
     saveDb();
+    syncUserAssets(task.userId);
     rememberResult(task);        // 登记"内容 → 产物"（必须在 result 赋值之后），供之后的同内容复用
     console.log(
       `[worker] ${task.id} 去字幕完成，用时 ${outcome.durationMs}ms，产物 ${formatBytes(kept ? stat.size : (outcome.size || 0))}${kept ? '' : '（云端保存，未落盘）'}`,
@@ -1607,7 +1659,7 @@ async function fileDuration(file) {
 
 function assertTaskOwner(task, user) {
   if (!user) throw Object.assign(new Error('请重新登录'), { status: 401 });
-  if (user.role !== 'admin' && task.userId !== user.id) throw Object.assign(new Error('任务不存在'), { status: 404 });
+  if (!task || !task.userId || task.userId !== user.id) throw Object.assign(new Error('任务不存在'), { status: 404 });
 }
 
 /** 统一的成功收尾：写结果、算耗时、登记复用索引 */
@@ -1625,7 +1677,8 @@ function finishTaskResult(task, { name, size, hasVideo, remote, remoteUrl = null
   task.elapsedSeconds = Math.round((Date.parse(task.finishedAt) - Date.parse(task.startedAt)) / 1000);
   task.etaSeconds = 0;
   saveDb();
-  rememberResult(task);
+  if (task.sourcePlatform !== 'douyin') rememberResult(task);
+  syncUserAssets(task.userId);
 }
 
 /** 用本地 ffmpeg 把 SRT 烧进视频（2 核机器较慢，仅建议短片） */
@@ -1689,11 +1742,10 @@ async function ensureThumb(file) {
   }
 }
 
-/** 源文件的直接操作（删除/处理）只允许上传者本人；无主的历史文件放行 */
+/** 源文件的直接操作只允许上传者本人；无主记录默认拒绝访问。 */
 function assertFileAccess(file, user) {
   if (!user) throw Object.assign(new Error('请重新登录'), { status: 401 });
-  if (user.role === 'admin') return;
-  if (file.userId && file.userId !== user.id) throw Object.assign(new Error('文件不存在'), { status: 404 });
+  if (!file || !file.userId || file.userId !== user.id) throw Object.assign(new Error('文件不存在'), { status: 404 });
 }
 
 /** All launch routes use the same validation, charge and queue transition. */
@@ -2034,8 +2086,10 @@ function parseVideoUrl(rawUrl) {
   let parsed;
   try { parsed = new URL(raw); } catch { throw Object.assign(new Error('链接格式不正确，请粘贴完整的 http/https 地址'), { status: 400 }); }
   if (!/^https?:$/.test(parsed.protocol)) throw Object.assign(new Error('只支持 http:// 或 https:// 的视频直链'), { status: 400 });
-  // 抖音/快手等分享短链：页面地址由 JS + 签名动态生成，纯服务端抓不到真实视频地址
-  if (/^(?:v\.douyin\.com|www\.iesdouyin\.com|v\.kuaishou\.com|www\.kuaishou\.com|xiaohongshu\.com|www\.xiaohongshu\.com|bilibili\.com|b23\.tv)$/i.test(parsed.hostname)) {
+  if (['v.douyin.com', 'www.iesdouyin.com', 'www.douyin.com', 'douyin.com'].includes(parsed.hostname.toLowerCase())) {
+    return { url: raw, name: '抖音视频.mp4', ext: '.mp4', platform: 'douyin' };
+  }
+  if (/^(?:v\.kuaishou\.com|www\.kuaishou\.com|xiaohongshu\.com|www\.xiaohongshu\.com|bilibili\.com|b23\.tv)$/i.test(parsed.hostname)) {
     throw Object.assign(new Error('暂不支持该平台的分享链接：抖音/快手/小红书等页面的视频地址由浏览器动态生成，服务端无法直接获取。请先在 App 里「保存到本地」，再到「去字幕」上传视频。'), { status: 400 });
   }
   let base = 'video.mp4';
@@ -2046,6 +2100,85 @@ function parseVideoUrl(rawUrl) {
     throw Object.assign(new Error(`链接文件类型 ${ext || '(无扩展名)'} 不受支持；请使用直链（.mp4/.mov/.mkv/.avi/.flv/.ts/.wmv）`), { status: 415 });
   }
   return { url: raw, name, ext };
+}
+
+function extractVideoLinks(input) {
+  const values = Array.isArray(input) ? input : [input];
+  return [...new Set(values.flatMap((value) => String(value || '').match(/https?:\/\/[^\s<>"']+/gi) || [])
+    .map((value) => value.replace(/[，。；！）\]),;!]+$/, '')))];
+}
+
+const douyinPool = createPool(1, 'douyin');
+async function importDouyinVideo(info, user) {
+  return douyinPool.run(async () => {
+    await assertPublicRemoteUrl(info.url);
+    const python = process.env.DOUYIN_PYTHON_PATH || path.join(__dirname, 'venv-douyin/bin/python');
+    const stdout = await new Promise((resolve, reject) => {
+      execFile(python, [path.join(__dirname, 'scripts/douyin_resolver.py'), info.url], {
+        timeout: 65000, maxBuffer: 1024 * 1024,
+        env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: path.join(__dirname, 'pw-browsers') },
+      }, (err, output) => err ? reject(Object.assign(new Error(err.code === 'ENOENT'
+        ? '抖音解析环境尚未安装，请联系管理员' : '抖音解析失败，请确认作品公开可访问后重试'), { status: 502 })) : resolve(output));
+    });
+    let resolved;
+    try { resolved = JSON.parse(stdout); } catch { throw new Error('抖音解析响应无效，请稍后重试'); }
+    if (!resolved.url) throw new Error(resolved.error || '没有找到可下载的视频');
+    await assertPublicRemoteUrl(resolved.url);
+    let downloadUrl = resolved.url;
+    let response;
+    for (let redirects = 0; redirects < 5; redirects += 1) {
+      await assertPublicRemoteUrl(downloadUrl);
+      response = await fetch(downloadUrl, { redirect: 'manual', signal: AbortSignal.timeout(180000),
+        headers: { Referer: 'https://www.douyin.com/',
+          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1' } });
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      const location = response.headers.get('location');
+      await response.body?.cancel();
+      if (!location) throw new Error('视频下载跳转地址无效');
+      downloadUrl = new URL(location, downloadUrl).href;
+    }
+    if (!response?.ok || !response.body) throw new Error(`下载抖音视频失败：HTTP ${response?.status || 0}`);
+    if (Number(response.headers.get('content-length')) > MAX_UPLOAD_BYTES) {
+      await response.body.cancel();
+      throw new Error(`视频超过 ${formatBytes(MAX_UPLOAD_BYTES)} 大小限制`);
+    }
+    const tmp = path.join(UPLOAD_DIR, `.incoming-douyin-${crypto.randomUUID()}`);
+    const md5 = crypto.createHash('md5');
+    const sha = crypto.createHash('sha256');
+    let size = 0;
+    try {
+      await pipeline(Readable.fromWeb(response.body), async function* (source) {
+        for await (const chunk of source) {
+          size += chunk.length;
+          if (size > MAX_UPLOAD_BYTES) throw new Error('视频超过文件大小限制');
+          md5.update(chunk); sha.update(chunk); yield chunk;
+        }
+      }, fs.createWriteStream(tmp, { flags: 'wx' }));
+      if (!size) throw new Error('下载的视频为空');
+      const duration = await probeVideoDuration(tmp);
+      const digest = md5.digest('hex');
+      const indexKey = fileIndexKey(user.id, digest);
+      const quality = { label: '中等码率', bitrate: resolved.bitrate, variants: resolved.variants, rank: resolved.rank };
+      const existing = db.files[db.md5Index[indexKey]];
+      if (await blobExists(existing)) {
+        await fsp.rm(tmp, { force: true });
+        existing.expiresAt = new Date(Date.now() + UPLOAD_TTL_MS).toISOString();
+        existing.durationSec = duration; existing.durationVerified = true;
+        existing.sourceQuality = quality;
+        return existing;
+      }
+      const stored = path.join(UPLOAD_DIR, `${digest}.mp4`);
+      await fsp.rename(tmp, stored);
+      const file = { id: id('vf'), md5: digest, sha256: sha.digest('hex'), name: `抖音-${resolved.id}.mp4`,
+        names: [`抖音-${resolved.id}.mp4`], ext: '.mp4', size, mime: 'video/mp4',
+        storedPath: path.relative(DATA_DIR, stored), userId: user.id, hits: 1,
+        createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + UPLOAD_TTL_MS).toISOString(),
+        durationSec: duration, durationVerified: true, sourceQuality: quality };
+      db.files[file.id] = file; db.md5Index[indexKey] = file.id; saveDb();
+      console.log(`[douyin] 中等码率 ${resolved.bitrate} bps，第 ${resolved.rank}/${resolved.variants} 档，${formatBytes(size)}`);
+      return file;
+    } catch (err) { await fsp.rm(tmp, { force: true }); throw err; }
+  });
 }
 
 function isPrivateAddress(rawAddress) {
@@ -2167,8 +2300,8 @@ function normalizeVideoGenerationStatus(value) {
 
 function videoGenerationForUser(userId, activeOnly = false) {
   return Object.values(db.videoGenerations)
-    .filter((item) => item.userId === userId && (!activeOnly || VIDEO_GENERATION_ACTIVE.has(item.status)))
-    .sort((a, b) => Date.parse(b.updatedAt || b.createdAt || 0) - Date.parse(a.updatedAt || a.createdAt || 0))[0] || null;
+    .filter((item) => item.userId === userId && !item.dismissedAt && (!activeOnly || VIDEO_GENERATION_ACTIVE.has(item.status)))
+    .sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0))[0] || null;
 }
 
 function serializeVideoGeneration(item) {
@@ -2189,7 +2322,13 @@ function serializeVideoGeneration(item) {
     createdAt: item.createdAt,
     startedAt: item.startedAt || null,
     duration: item.duration ?? null,
-    results: Array.isArray(item.results) ? item.results : [],
+    results: (() => {
+      return [...new Set(resultVideoUrls(item.results))].flatMap((url, index) => {
+        const assetId = `generation:${item.taskId}:${index}`;
+        if (db.assetTombstones[assetId]) return [];
+        return [{ url: db.assets[assetId]?.state === 'ready' ? `/api/assets/${encodeURIComponent(assetId)}/content` : url }];
+      });
+    })(),
     error: item.error || null,
     errorCode: item.errorCode || null,
     failureStage: item.failureStage || null,
@@ -2216,11 +2355,181 @@ async function refreshVideoGeneration(item) {
     item.failureStage = 'generation';
   }
   item.updatedAt = new Date().toISOString();
+  if (item.status === 'SUCCESS') registerGenerationAssets(item);
   if (before !== JSON.stringify([item.status, item.duration, item.startedAt, item.results])) saveDb();
   return item;
 }
 
+const assetSaves = new Map();
+const assetSavePool = createPool(2, 'asset-save');
+const assetKindForExt = (ext) => IMAGE_REFERENCE_EXT.has(ext) ? 'image'
+  : ['.mp3', '.wav', '.m4a', '.flac', '.aac'].includes(ext) ? 'audio'
+    : ['.txt', '.srt', '.vtt'].includes(ext) ? 'text' : 'video';
+
+function serializeAsset(asset) {
+  const url = `/api/assets/${encodeURIComponent(asset.id)}/content`;
+  return { id: asset.id, name: asset.name, kind: asset.kind, ext: asset.ext, source: asset.source,
+    size: asset.size || 0, sizeText: formatBytes(asset.size || 0), createdAt: asset.createdAt,
+    state: asset.state, error: asset.error || null, url, downloadUrl: `${url}?dl=1`,
+    thumbUrl: asset.kind === 'image' && asset.state === 'ready' ? url : null,
+    canReference: asset.state === 'ready', text: asset.kind === 'text' ? asset.text : undefined };
+}
+
+function registerReferenceAsset(reference) {
+  const assetId = reference.assetId || `reference:${reference.id}`;
+  if (db.assetTombstones[assetId]) return;
+  reference.persistent = true; reference.expiresAt = null; reference.assetId = assetId;
+  db.assets[assetId] ||= { id: assetId, userId: reference.userId, name: reference.name,
+    ext: reference.ext, kind: reference.kind, mime: reference.mime, size: reference.size,
+    storedPath: reference.storedPath, referenceId: reference.id, source: 'upload', state: 'ready', createdAt: reference.createdAt };
+}
+
+function scheduleAssetSave(asset, sourcePath = null) {
+  if (asset.state === 'ready' || assetSaves.has(asset.id)) return;
+  if (asset.failedAt && Date.now() - Date.parse(asset.failedAt) < 60000) return;
+  asset.state = 'saving'; asset.error = null;
+  const promise = assetSavePool.run(async () => {
+    const basename = crypto.createHash('sha256').update(asset.id).digest('hex');
+    const dest = path.join(ASSET_DIR, `${basename}${asset.ext}`);
+    const tmp = `${dest}.incoming`;
+    try {
+      const guard = diskGuard();
+      if (!guard.ok) throw new Error(diskLowMessage(guard.free));
+      if (sourcePath) await fsp.copyFile(sourcePath, tmp);
+      else {
+        let url = asset.remoteUrl;
+        let response;
+        for (let n = 0; n < 5; n += 1) {
+          await assertPublicRemoteUrl(url);
+          response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(180000) });
+          if (![301, 302, 303, 307, 308].includes(response.status)) break;
+          const location = response.headers.get('location'); await response.body?.cancel();
+          if (!location) throw new Error('下载地址跳转无效');
+          url = new URL(location, url).href;
+        }
+        if (!response?.ok || !response.body) throw new Error(`下载生成结果失败（HTTP ${response?.status || 0}）`);
+        const max = Math.max(MAX_UPLOAD_BYTES, 500 * 1024 ** 2);
+        let received = 0;
+        await pipeline(Readable.fromWeb(response.body), async function* (source) {
+          for await (const chunk of source) {
+            received += chunk.length;
+            if (received > max) throw new Error('资产文件超过保存大小限制');
+            yield chunk;
+          }
+        }, fs.createWriteStream(tmp));
+      }
+      if (!db.assets[asset.id]) { await fsp.rm(tmp, { force: true }); return; }
+      const stat = await fsp.stat(tmp);
+      if (!stat.size) throw new Error('资产文件为空');
+      await fsp.rename(tmp, dest);
+      Object.assign(asset, { storedPath: path.relative(DATA_DIR, dest), size: stat.size, state: 'ready', error: null });
+      delete asset.remoteUrl;
+    } catch (err) {
+      await fsp.rm(tmp, { force: true });
+      asset.state = 'failed'; asset.error = err.message; asset.failedAt = new Date().toISOString();
+    } finally { saveDb(); }
+  }).finally(() => assetSaves.delete(asset.id));
+  assetSaves.set(asset.id, promise);
+}
+
+function resultVideoUrls(value) {
+  if (typeof value === 'string') return /^https?:\/\//i.test(value) && !/\.(?:png|jpg|jpeg|webp|gif)(?:\?|$)/i.test(value) ? [value] : [];
+  if (Array.isArray(value)) return value.flatMap(resultVideoUrls);
+  if (!value || typeof value !== 'object') return [];
+  return Object.entries(value).filter(([key]) => !/cover|thumb|poster/i.test(key)).flatMap(([, item]) => resultVideoUrls(item));
+}
+
+function registerGenerationAssets(generation) {
+  const promptId = generation.promptAssetId || `prompt:${generation.taskId}`;
+  if (generation.prompt && !db.assetTombstones[promptId]) {
+    db.assets[promptId] ||= { id: promptId, userId: generation.userId, kind: 'text', ext: '.txt',
+      mime: 'text/plain; charset=utf-8', name: `提示词-${generation.prompt.slice(0, 24)}.txt`,
+      text: generation.prompt, size: Buffer.byteLength(generation.prompt), state: 'ready',
+      source: 'prompt', createdAt: generation.createdAt };
+  }
+  if (generation.status !== 'SUCCESS') return;
+  [...new Set(resultVideoUrls(generation.results))].slice(0, 20).forEach((url, index) => {
+    const assetId = `generation:${generation.taskId}:${index}`;
+    if (db.assetTombstones[assetId]) return;
+    const asset = db.assets[assetId] ||= { id: assetId, userId: generation.userId, kind: 'video', ext: '.mp4',
+      mime: 'video/mp4', name: `生成视频-${generation.taskId}-${index + 1}.mp4`, source: 'generation',
+      remoteUrl: url, state: 'saving', createdAt: generation.updatedAt || generation.createdAt };
+    scheduleAssetSave(asset);
+  });
+  saveDb();
+}
+
+function syncUserAssets(userId) {
+  for (const reference of Object.values(db.references)) if (reference.userId === userId) registerReferenceAsset(reference);
+  for (const generation of Object.values(db.videoGenerations)) if (generation.userId === userId) registerGenerationAssets(generation);
+  for (const file of Object.values(db.files)) {
+    const assetId = `file:${file.id}`;
+    if (file.userId !== userId || isFileExpired(file) || db.assetTombstones[assetId]) continue;
+    const asset = db.assets[assetId] ||= { id: assetId, userId, name: file.name, kind: assetKindForExt(file.ext),
+      ext: file.ext, mime: file.mime, source: 'upload', state: 'saving', createdAt: file.createdAt };
+    scheduleAssetSave(asset, path.join(DATA_DIR, file.storedPath));
+  }
+  for (const task of Object.values(db.tasks)) {
+    const assetId = `task:${task.id}`;
+    if (task.userId !== userId || task.status !== 'succeeded' || !task.result || db.assetTombstones[assetId]) continue;
+    const ext = task.result.srt ? '.srt' : '.mp4';
+    const asset = db.assets[assetId] ||= { id: assetId, userId, name: task.result.name || task.fileName,
+      kind: assetKindForExt(ext), ext, mime: MIME[ext], source: 'process', state: 'saving',
+      createdAt: task.finishedAt || task.createdAt, ...(task.result.remote ? { remoteUrl: task.remoteResultUrl } : {}) };
+    scheduleAssetSave(asset, task.result.remote ? null : path.join(OUTPUT_DIR, task.id, task.result.srt ? 'subtitle.srt' : 'output.mp4'));
+  }
+  saveDb();
+}
+
+function ownedAsset(req, assetId) {
+  const asset = db.assets[assetId];
+  if (!asset || asset.userId !== currentUser(req)?.id) throw Object.assign(new Error('资产不存在'), { status: 404 });
+  return asset;
+}
+
 const ROUTES = {
+  'GET /api/assets/:assetId/content': async (req, res, { params, url }) => {
+    const asset = ownedAsset(req, params.assetId);
+    if (asset.state !== 'ready') return sendError(res, 409, asset.error || '资产正在保存，请稍后重试');
+    if (asset.text !== undefined) {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store',
+        ...(url.searchParams.has('dl') ? { 'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(asset.name)}` } : {}) });
+      return res.end(req.method === 'HEAD' ? undefined : asset.text);
+    }
+    serveFile(req, res, path.join(DATA_DIR, asset.storedPath), { mime: asset.mime,
+      downloadName: url.searchParams.has('dl') ? asset.name : undefined });
+  },
+  'POST /api/assets/:assetId/reference': async (req, res, { params }) => {
+    const asset = ownedAsset(req, params.assetId);
+    if (asset.state !== 'ready') return sendError(res, 409, '资产尚未保存完成');
+    if (asset.kind === 'text') {
+      const text = asset.text ?? await fsp.readFile(path.join(DATA_DIR, asset.storedPath), 'utf8');
+      return sendJson(res, 200, { text });
+    }
+    if (!REFERENCE_EXT.has(asset.ext)) return sendError(res, 415, '此格式暂不能添加到参考区');
+    const referenceId = id('ref');
+    const dest = path.join(REFERENCE_DIR, `${referenceId}${asset.ext}`);
+    await fsp.copyFile(path.join(DATA_DIR, asset.storedPath), dest);
+    const reference = { id: referenceId, userId: asset.userId, name: asset.name, ext: asset.ext,
+      kind: asset.kind, mime: asset.mime, size: asset.size, assetId: asset.id, persistent: true,
+      expiresAt: null, createdAt: new Date().toISOString(), storedPath: path.relative(DATA_DIR, dest) };
+    db.references[reference.id] = reference; saveDb();
+    sendJson(res, 201, { reference: serializeReference(reference) });
+  },
+  'DELETE /api/assets/:assetId': async (req, res, { params }) => {
+    const asset = ownedAsset(req, params.assetId);
+    const refs = Object.values(db.references).filter((ref) => ref.assetId === asset.id);
+    if (Object.values(db.videoGenerations).some((g) => VIDEO_GENERATION_ACTIVE.has(g.status)
+      && refs.some((ref) => g.referenceIds?.includes(ref.id)))) return sendError(res, 409, '素材正在用于生成，请等待任务完成后删除');
+    if (assetSaves.has(asset.id)) return sendError(res, 409, '资产正在保存，请稍后删除');
+    for (const ref of refs) {
+      delete db.references[ref.id];
+      await fsp.rm(path.join(DATA_DIR, ref.storedPath), { force: true });
+    }
+    if (asset.storedPath) await fsp.rm(path.join(DATA_DIR, asset.storedPath), { force: true });
+    delete db.assets[asset.id]; db.assetTombstones[asset.id] = new Date().toISOString(); saveDb();
+    sendJson(res, 200, { deleted: true });
+  },
   'GET /api/config': async (req, res) => {
     sendJson(res, 200, {
       service: 'ClipFlow AI',
@@ -2294,7 +2603,7 @@ const ROUTES = {
     if (references.some((reference) => !reference || reference.userId !== user.id)) {
       return sendError(res, 404, '参考素材不存在或不属于当前账号');
     }
-    if (references.some((reference) => (Date.parse(reference.expiresAt || 0) || 0) <= Date.now())) {
+    if (references.some((reference) => reference.expiresAt && Date.parse(reference.expiresAt) <= Date.now())) {
       return sendError(res, 410, '参考素材已过期，请重新上传');
     }
     if (references.some((reference) => reference.kind !== 'image' || !IMAGE_REFERENCE_EXT.has(reference.ext))) {
@@ -2337,23 +2646,42 @@ const ROUTES = {
       return sendError(res, 409, '当前视频正在提交，请勿重复点击');
     }
     videoGenerationSubmissionLocks.add(user.id);
+    const promptAssetId = `prompt:${id('text')}`;
+    db.assets[promptAssetId] = { id: promptAssetId, userId: user.id, kind: 'text', ext: '.txt',
+      mime: 'text/plain; charset=utf-8', name: `提示词-${prompt.slice(0, 24)}.txt`, text: prompt,
+      size: Buffer.byteLength(prompt), state: 'ready', source: 'prompt', createdAt: new Date().toISOString() };
+    saveDb();
     let upstream;
+    const saveSubmissionFailure = (err) => {
+      const failed = { taskId: id('submission'), userId: user.id, status: 'FAILED', prompt, promptAssetId,
+        workflow, mode, parameters, referenceIds, results: [], createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(), failureStage: 'submission', error: err.message,
+        errorCode: err.errorCode || 'PROVIDER_REQUEST_FAILED' };
+      db.videoGenerations[failed.taskId] = failed;
+      db.videoGenerationCurrent[user.id] = failed.taskId; saveDb();
+      return serializeVideoGeneration(failed);
+    };
     try {
       upstream = await autodlRequest(`/comfyui_workflow/${encodeURIComponent(workflow)}`, {
         method: 'POST',
         body: { ...parameters, prompt },
       });
+    } catch (err) {
+      const generation = saveSubmissionFailure(err);
+      return sendError(res, err.status || 502, err.message, { generation, errorCode: err.errorCode, stage: 'submission' });
     } finally {
       videoGenerationSubmissionLocks.delete(user.id);
     }
     if (upstream?.code !== 'Success' || !upstream?.data?.task_id) {
-      return sendError(res, 502, upstream?.msg || 'AutoDL 未返回任务 ID');
+      const err = new Error(upstream?.msg || 'AutoDL 未返回任务 ID');
+      return sendError(res, 502, err.message, { generation: saveSubmissionFailure(err), stage: 'submission' });
     }
     const record = {
       taskId: upstream.data.task_id,
       userId: user.id,
       status: normalizeVideoGenerationStatus(upstream.data.status || 'QUEUED'),
       prompt,
+      promptAssetId,
       workflow,
       mode,
       parameters,
@@ -2364,6 +2692,8 @@ const ROUTES = {
       results: [],
     };
     db.videoGenerations[record.taskId] = record;
+    db.videoGenerationCurrent[user.id] = record.taskId;
+    registerGenerationAssets(record);
     saveDb();
     sendJson(res, 202, {
       ...serializeVideoGeneration(record),
@@ -2372,11 +2702,27 @@ const ROUTES = {
 
   'GET /api/video-generations/current': async (req, res) => {
     const user = currentUser(req);
-    let generation = videoGenerationForUser(user.id, true) || videoGenerationForUser(user.id, false);
+    if (!Object.hasOwn(db.videoGenerationCurrent, user.id)) {
+      const latest = Object.values(db.videoGenerations).filter((item) => item.userId === user.id)
+        .sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0))[0];
+      db.videoGenerationCurrent[user.id] = latest && !latest.dismissedAt ? latest.taskId : null; saveDb();
+    }
+    let generation = videoGenerationForUser(user.id, true) || db.videoGenerations[db.videoGenerationCurrent[user.id]] || null;
+    if (generation?.dismissedAt) generation = null;
     if (generation && VIDEO_GENERATION_ACTIVE.has(generation.status)) {
       try { await refreshVideoGeneration(generation); } catch { /* 前端继续轮询原状态 */ }
     }
     sendJson(res, 200, { generation: serializeVideoGeneration(generation) });
+  },
+
+  'DELETE /api/video-generations/:taskId': async (req, res, { params }) => {
+    const generation = db.videoGenerations[params.taskId];
+    if (!generation || generation.userId !== currentUser(req).id) return sendError(res, 404, '生成任务不存在');
+    if (VIDEO_GENERATION_ACTIVE.has(generation.status)) return sendError(res, 409, '生成中的任务暂不能删除');
+    registerGenerationAssets(generation);
+    generation.dismissedAt = new Date().toISOString(); saveDb();
+    if (db.videoGenerationCurrent[generation.userId] === generation.taskId) db.videoGenerationCurrent[generation.userId] = null;
+    sendJson(res, 200, { deleted: true, assetsRetained: true });
   },
 
   'GET /api/video-generations/:taskId': async (req, res, { params }) => {
@@ -2919,7 +3265,8 @@ const ROUTES = {
   'POST /api/batches/:id/start': async (req, res, { params }) => {
     const batch = db.batches?.[params.id];
     if (!batch) return sendError(res, 404, '批次不存在或已被清理');
-    if (operationNeedsCloud(batch.operation) && !eraseApi.ready) {
+    if (operationNeedsCloud(batch.operation) && !eraseApi.ready
+      && batch.taskIds.some((tid) => db.tasks[tid]?.sourcePlatform !== 'douyin')) {
       return sendError(res, 503, '云端处理服务尚未就绪，请联系管理员开通后再试', {
         endpoint: eraseApi.endpoint, missing: eraseApi.missing,
       });
@@ -2961,81 +3308,74 @@ const ROUTES = {
    *   源文件不上传到本服务器；云端直接从该地址拉取
    */
   'POST /api/tasks/from-url': async (req, res) => {
-    if (!eraseApi.ready) {
-      return sendError(res, 503, '去字幕服务尚未就绪，请联系管理员开通后再试', { endpoint: eraseApi.endpoint, missing: eraseApi.missing });
-    }
     const body = await readJsonBody(req);
-    const rawUrl = String(body.url || '').trim();
-    let info;
-    try { info = parseVideoUrl(rawUrl); await assertPublicRemoteUrl(info.url); }
-    catch (err) { return sendError(res, err.status || 400, err.message); }
-    const dg = diskGuard();
-    if (!dg.ok) return sendError(res, 507, diskLowMessage(dg.free), { freeBytes: dg.free, minFreeBytes: dg.minFree });
+    const raw = extractVideoLinks(body.url)[0];
+    if (!raw) return sendError(res, 400, '请粘贴视频链接或抖音分享文案');
     const me = currentUser(req);
     if (!me) return sendError(res, 401, '请重新登录');
-    let duration;
-    try { duration = await probeVideoDuration(rawUrl); }
-    catch (err) { return sendError(res, err.status || 422, `无法读取该链接的视频信息：${err.message}`); }
-    // 去水印 = 全屏模式（Text + 全画面 + v5.6）
+    const dg = diskGuard();
+    if (!dg.ok) return sendError(res, 507, diskLowMessage(dg.free));
+    const info = parseVideoUrl(raw);
+    await assertPublicRemoteUrl(info.url);
     const eff = applyErasePreset({ preset: 'fullscreen' });
-    const task = createTaskForFile(
-      { id: null, name: info.name, size: 0, ext: info.ext, durationSec: duration, durationVerified: true,
-        createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + UPLOAD_TTL_MS).toISOString() },
-      { operation: DEFAULT_OPERATION, userId: me.id, eraseRegion: eff.region, eraseMode: eff.mode, modelVersion: eff.model },
-    );
-    task.fileId = null;
-    task.sourceUrl = rawUrl;
+    let task;
+    if (info.platform === 'douyin') {
+      const file = await importDouyinVideo(info, me);
+      task = createTaskForFile(file, { userId: me.id, eraseRegion: eff.region, eraseMode: eff.mode, modelVersion: eff.model });
+      task.sourcePlatform = 'douyin'; task.sourceQuality = file.sourceQuality; task.operationLabel = '抖音视频去水印';
+    } else {
+      if (!eraseApi.ready) return sendError(res, 503, '云端处理服务尚未就绪，请联系管理员');
+      const duration = await probeVideoDuration(info.url);
+      task = createUrlTask(info, me, eff);
+      task.durationSec = duration; task.durationVerified = true;
+    }
     task.erasePreset = eff.preset;
-    db.tasks[task.id] = task;
     try { await startTask(task, me); }
     catch (err) { refundTaskCredits(task, 'refund:failed'); delete db.tasks[task.id]; saveDb(); throw err; }
-    console.log(`[task] ${task.id} 链接去水印 <- ${rawUrl}（${duration.toFixed(1)}s）`);
     sendJson(res, 202, { task: serializeTask(task), poll: `/api/tasks/${task.id}` });
   },
 
-  /** 链接去水印（批量）：一次粘贴多条直链，建成一个批次，随后用「批量开始」统一启动 */
+  /** 分享文案和直链共用批次列表；抖音选择中等码率并保存到本地。 */
   'POST /api/batches/from-urls': async (req, res) => {
-    if (!eraseApi.ready) {
-      return sendError(res, 503, '去字幕服务尚未就绪，请联系管理员开通后再试', { endpoint: eraseApi.endpoint, missing: eraseApi.missing });
-    }
     const body = await readJsonBody(req);
-    const rawList = Array.isArray(body.urls) ? body.urls : String(body.urls || '').split(/[\s,，]+/);
-    const urls = [...new Set(rawList.map((u) => String(u || '').trim()).filter(Boolean))];
-    if (!urls.length) return sendError(res, 400, '请至少粘贴一个视频链接');
-    if (urls.length > MAX_BATCH_SIZE) return sendError(res, 400, `一批最多 ${MAX_BATCH_SIZE} 个链接（当前 ${urls.length} 个）`, { maxBatchSize: MAX_BATCH_SIZE });
+    const urls = extractVideoLinks(body.urls);
+    if (!urls.length) return sendError(res, 400, '请粘贴视频链接或抖音分享文案');
+    if (urls.length > MAX_BATCH_SIZE) return sendError(res, 400, `一批最多 ${MAX_BATCH_SIZE} 个链接`);
     const dg = diskGuard();
-    if (!dg.ok) return sendError(res, 507, diskLowMessage(dg.free), { freeBytes: dg.free, minFreeBytes: dg.minFree });
+    if (!dg.ok) return sendError(res, 507, diskLowMessage(dg.free));
     const me = currentUser(req);
     if (!me) return sendError(res, 401, '请重新登录');
-
     const eff = applyErasePreset({ preset: 'fullscreen' });
-    const batch = {
-      id: id('batch'), createdAt: new Date().toISOString(), operation: DEFAULT_OPERATION,
-      erasePreset: eff.preset, enhance: false, resolution: null, userId: me.id, taskIds: [], items: [],
-    };
+    const batch = { id: id('batch'), createdAt: new Date().toISOString(), operation: DEFAULT_OPERATION,
+      erasePreset: eff.preset, enhance: false, resolution: null, userId: me.id, taskIds: [], items: [] };
     const skipped = [];
-    const created = [];
     for (const raw of urls) {
-      let info;
-      try { info = parseVideoUrl(raw); await assertPublicRemoteUrl(info.url); }
-      catch (err) { skipped.push({ url: raw, reason: err.message }); continue; }
-      let duration;
-      try { duration = await probePool.run(() => probeVideoDuration(info.url)); }
-      catch (err) { skipped.push({ url: raw, reason: `无法读取视频信息：${err.message}` }); continue; }
-      const task = createUrlTask(info, me, eff);
-      task.durationSec = duration;
-      task.durationVerified = true;
-      task.estimatedSeconds = Math.max(MIN_ESTIMATE_SEC, Math.round(duration * currentRtf(task.mode)));
-      task.etaSeconds = task.estimatedSeconds;
-      task.sourceExpiresAt = task.sourceExpiresAt || null;
-      batch.items.push({ fileId: null, taskId: task.id, shared: false, reused: false, attached: false, sharedWithFileId: null });
-      if (!batch.taskIds.includes(task.id)) batch.taskIds.push(task.id);
-      created.push(task.id);
+      try {
+        const info = parseVideoUrl(raw);
+        await assertPublicRemoteUrl(info.url);
+        let task;
+        let fileId = null;
+        if (info.platform === 'douyin') {
+          const file = await importDouyinVideo(info, me);
+          fileId = file.id;
+          task = createTaskForFile(file, { userId: me.id, eraseRegion: eff.region, eraseMode: eff.mode, modelVersion: eff.model });
+          task.sourcePlatform = 'douyin'; task.sourceQuality = file.sourceQuality;
+          task.operationLabel = '抖音视频去水印'; task.estimatedSeconds = 5; task.etaSeconds = 5;
+        } else {
+          if (!eraseApi.ready) throw new Error('云端处理服务尚未就绪，请联系管理员');
+          const duration = await probePool.run(() => probeVideoDuration(info.url));
+          task = createUrlTask(info, me, eff);
+          task.durationSec = duration; task.durationVerified = true;
+          task.estimatedSeconds = Math.max(MIN_ESTIMATE_SEC, Math.round(duration * currentRtf(task.mode)));
+          task.etaSeconds = task.estimatedSeconds;
+        }
+        task.erasePreset = eff.preset;
+        batch.items.push({ fileId, taskId: task.id, shared: false, reused: false, attached: false, sharedWithFileId: null });
+        batch.taskIds.push(task.id);
+      } catch (err) { skipped.push({ url: raw, reason: err.message }); }
     }
-    if (!batch.items.length) return sendError(res, 422, '没有可处理的链接', { skipped });
-    db.batches[batch.id] = batch;
-    saveDb();
-    console.log(`[batch] ${batch.id} 链接批次：${created.length} 个链接，跳过 ${skipped.length} 个`);
+    if (!batch.items.length) return sendError(res, 422, skipped[0]?.reason || '没有可处理的链接', { skipped });
+    db.batches[batch.id] = batch; saveDb();
     sendJson(res, 202, { ...serializeBatch(batch), skipped, poll: `/api/batches/${batch.id}` });
   },
 
@@ -3113,43 +3453,24 @@ const ROUTES = {
     sendJson(res, 200, { tasks: list, total: list.length });
   },
 
-  /** 资产中心：当前用户上传的源文件 + 已完成的处理产物（统一列表） */
+  /** 资产与任务独立保存；删除任务展示不会删除素材。 */
   'GET /api/assets': async (req, res) => {
-    const me = currentUser(req);
-    if (!me) return sendError(res, 401, '请重新登录');
-    const out = [];
-    for (const f of Object.values(db.files || {})) {
-      if (f.userId !== me.id) continue;
-      out.push({
-        id: `file:${f.id}`, fileId: f.id, kind: 'video', source: 'upload',
-        name: f.name, size: f.size || 0, sizeText: formatBytes(f.size || 0),
-        createdAt: f.createdAt, expiresAt: f.expiresAt || null,
-        url: `/f/${f.id}`, thumbUrl: `/api/thumb/file/${f.id}`,
-      });
-    }
-    for (const t of Object.values(db.tasks || {})) {
-      if (t.userId !== me.id || t.status !== 'succeeded' || !t.result) continue;
-      out.push({
-        id: `task:${t.id}`, taskId: t.id, kind: t.result.srt ? 'text' : 'video', source: 'process',
-        name: t.result.name || t.fileName || t.id, size: t.result.size || 0, sizeText: formatBytes(t.result.size || 0),
-        createdAt: t.finishedAt || t.createdAt, expiresAt: t.remoteExpiresAt || null,
-        operation: t.operation, downloadUrl: `/api/download/${t.id}`, remote: !!t.result.remote,
-      });
-    }
-    out.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
-    const totalBytes = out.reduce((sum, x) => sum + (Number(x.size) || 0), 0);
-    sendJson(res, 200, { assets: out, total: out.length, totalBytes, totalText: formatBytes(totalBytes) });
+    const user = currentUser(req);
+    syncUserAssets(user.id);
+    const assets = Object.values(db.assets).filter((asset) => asset.userId === user.id)
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))).map(serializeAsset);
+    const totalBytes = assets.reduce((sum, asset) => sum + asset.size, 0);
+    sendJson(res, 200, { assets, total: assets.length, totalBytes, totalText: formatBytes(totalBytes) });
   },
 
   /** 源文件缩略图（懒生成 + 磁盘缓存） */
   'GET /api/thumb/file/:id': async (req, res, { params }) => {
     const file = db.files[params.id];
     if (!file) return sendError(res, 404, '文件不存在');
-    const me = currentUser(req);
-    if (me && me.role !== 'admin' && file.userId && file.userId !== me.id) return sendError(res, 404, '文件不存在');
+    assertFileAccess(file, currentUser(req));
     const dest = await ensureThumb(file);
     if (!dest) return sendError(res, 422, '缩略图生成失败');
-    serveFile(req, res, dest, { mime: 'image/jpeg', cache: 'public, max-age=3600' });
+    serveFile(req, res, dest, { mime: 'image/jpeg', cache: 'private, no-store' });
   },
 
   'DELETE /api/files/:id': async (req, res, { params }) => {
@@ -3260,7 +3581,7 @@ batch.items.splice(idx, 1);
   'POST /api/tasks/:id/start': async (req, res, { params }) => {
     const task = db.tasks[params.id];
     if (!task) return sendError(res, 404, '任务不存在');
-    if (operationNeedsCloud(task.operation) && !eraseApi.ready) {
+    if (task.sourcePlatform !== 'douyin' && operationNeedsCloud(task.operation) && !eraseApi.ready) {
       return sendError(res, 503, '云端处理服务尚未就绪，请联系管理员开通后再试', {
         endpoint: eraseApi.endpoint, missing: eraseApi.missing,
       });
@@ -3331,13 +3652,15 @@ batch.items.splice(idx, 1);
       res.writeHead(302, { Location: task.remoteResultUrl, 'Cache-Control': 'no-store' });
       return res.end();
     }
-    serveFile(req, res, path.join(OUTPUT_DIR, task.id, fileName), { cache: 'public, max-age=31536000, immutable' });
+    serveFile(req, res, path.join(OUTPUT_DIR, task.id, fileName), { cache: 'private, no-store' });
   },
 
   /** 公开访问 URL：/f/:id —— 按文件的唯一 ID 访问，去字幕接口就是拉这里 */
   'GET /f/:id': async (req, res, { params }) => {
     const file = findFileByKey(params.id);
     if (!file) return sendError(res, 404, '文件不存在或已过期');
+    const me = currentUser(req);
+    if (me) assertFileAccess(file, me);
     if (isFileExpired(file)) {
       return sendError(res, 410, `文件已过期（超过 ${ttlHours()} 小时）并被删除，请重新上传`, { expiresAt: new Date(fileExpiresAt(file)).toISOString() });
     }
@@ -3347,6 +3670,7 @@ batch.items.splice(idx, 1);
     serveFile(req, res, path.join(DATA_DIR, file.storedPath), {
       mime: MIME[file.ext] || file.mime,
       downloadName: asDownload ? file.name : undefined,
+      cache: 'private, no-store',
     });
   },
 
@@ -3354,12 +3678,14 @@ batch.items.splice(idx, 1);
   'GET /r/:id': async (req, res, { params }) => {
     const reference = db.references[params.id];
     if (!reference) return sendError(res, 404, '参考素材不存在或已过期');
-    if ((Date.parse(reference.expiresAt || 0) || 0) <= Date.now()) {
+    const me = currentUser(req);
+    if (me && (!reference.userId || reference.userId !== me.id)) return sendError(res, 404, '参考素材不存在或已过期');
+    if (reference.expiresAt && Date.parse(reference.expiresAt) <= Date.now()) {
       return sendError(res, 410, '参考素材已过期，请重新上传');
     }
     serveFile(req, res, path.join(DATA_DIR, reference.storedPath), {
       mime: reference.mime || MIME[reference.ext] || 'application/octet-stream',
-      cache: 'private, max-age=300',
+      cache: 'private, no-store',
     });
   },
 };
@@ -3437,14 +3763,9 @@ const server = http.createServer(async (req, res) => {
     const route = matchRoute(req.method, url.pathname);
     if (!route) return sendError(res, 404, `无此接口: ${req.method} ${url.pathname}`);
 
-    // ---- 鉴权：除登录相关接口与「能力 URL」外，全部要求有效会话 ----
-    // 公开的只有 /f/<vf_xxx>：16 字节随机 ID，属于不可猜测的 capability URL，
-    // 供云端去字幕服务匿名拉取源文件；/f/<md5> 可被推算，因此必须登录。
-    // 允许 GET 与 HEAD：云端/CDN 常常先用 HEAD 探测可达性，只放行 GET 会把它们挡在 401 外
-    const capabilityUrl =
-      (req.method === 'GET' || req.method === 'HEAD') && (
-        /^\/f\/vf_[A-Za-z0-9_-]+$/.test(url.pathname) || /^\/r\/ref_[A-Za-z0-9_-]+$/.test(url.pathname)
-      );
+    // 云端处理只可通过有效期 6 小时的签名 URL 匿名读取文件；随机 ID 本身不再视作公开权限。
+    const capabilityUrl = (req.method === 'GET' || req.method === 'HEAD') &&
+      (/^\/f\/(?:vf_[A-Za-z0-9_-]+|[a-f0-9]{32})$/.test(url.pathname) || /^\/r\/ref_[A-Za-z0-9_-]+$/.test(url.pathname)) && validCapabilityUrl(url);
     const authless = PUBLIC_ROUTES.has(`${req.method} ${url.pathname}`) || capabilityUrl;
 
     // 限流：全局并发 + 每用户 + 每 IP（白名单/管理员豁免）
@@ -3470,26 +3791,30 @@ const server = http.createServer(async (req, res) => {
       if (meUser?.suspended) return sendError(res, 403, `账号已被暂停：${meUser.suspended.reason}，请联系管理员`);
     }
 
-    // 归属校验：批次/任务必须属于当前用户（管理员例外，历史无主数据仅管理员可访问）
+    // 归属校验：所有账号（管理员也包括在内）只可访问自己的任务和批次。
     if (!authless) {
       const me = currentUser(req);
-      if (me && me.role !== 'admin') {
+      if (me) {
         const mB = /^\/api\/batches\/([^/]+)/.exec(url.pathname);
         const mT = /^\/api\/(?:tasks|download|artifacts)\/([^/]+)/.exec(url.pathname);
         const owner = mB ? db.batches[route.params.id || route.params.batchId] : mT ? db.tasks[route.params.id] : null;
-        if (owner && owner.userId !== me.id) {
+        if (owner && (!owner.userId || owner.userId !== me.id)) {
           return sendError(res, 404, '资源不存在');
         }
-        // Historical batches may still reference another account's task. Do not grant access through the batch.
-        if (mB && owner && (owner.items || []).some((it) => db.tasks[it.taskId] && db.tasks[it.taskId].userId !== me.id)) {
-          return sendError(res, 409, '旧批次包含其它账号的任务，请重新创建批次');
+        // 批次及其行引用的文件和任务都必须属于该用户，旧数据异常时整体拒绝。
+        if (mB && owner && (owner.items || []).some((it) => {
+          const task = db.tasks[it.taskId];
+          const file = db.files[it.fileId];
+          return (task && task.userId !== me.id) || (file && file.userId !== me.id);
+        })) {
+          return sendError(res, 404, '资源不存在');
         }
       }
     }
 
     if (!authless && !currentUser(req)) {
       // 便于排查「莫名掉登录」：记录是否携带了 Cookie
-      console.warn(`[auth] 401 ${req.method} ${url.pathname} cookie=${req.headers.cookie ? `已携带(${String(req.headers.cookie).slice(0, 40)}…)` : '未携带'}`);
+      console.warn(`[auth] 401 ${req.method} ${url.pathname} cookie=${req.headers.cookie ? '已携带' : '未携带'}`);
       if (req.method === 'HEAD') {
         res.writeHead(401, { 'www-authenticate': 'Cookie', 'cache-control': 'no-store' });
         return res.end();
@@ -3536,6 +3861,10 @@ try {
 } catch (err) { console.warn('[accounts]', err.message); }
 
 server.listen(PORT, HOST, async () => {
+  for (const reference of Object.values(db.references)) registerReferenceAsset(reference);
+  for (const generation of Object.values(db.videoGenerations)) registerGenerationAssets(generation);
+  for (const userId of new Set([...Object.values(db.files), ...Object.values(db.tasks)].map((item) => item.userId).filter(Boolean))) syncUserAssets(userId);
+  saveDb();
   // 先接管/清理上次运行遗留的「处理中」任务，再开始服务
   recoverInterruptedTasks();
   const swept = await sweepExpired('startup').catch((err) => {

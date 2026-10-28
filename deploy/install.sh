@@ -281,6 +281,31 @@ fix_perms() {
   chmod 600 "$APP_DIR/clipflow.env" 2>/dev/null || true
 }
 
+install_douyin_resolver() {
+  [ "${SKIP_PACKAGES:-0}" = "1" ] && return 0
+  log "安装抖音分享链接解析环境"
+  local python_bin
+  if command -v dnf >/dev/null 2>&1; then
+    dnf install -y -q --setopt=install_weak_deps=False python3.11 python3.11-pip \
+      atk at-spi2-atk at-spi2-core libdrm libxcb libX11 libXcomposite libXdamage \
+      libXext libXfixes libXrandr mesa-libgbm pango cairo alsa-lib
+    python_bin="$(command -v python3.11)"
+  elif command -v apt-get >/dev/null 2>&1; then
+    apt-get install -y -qq python3 python3-venv libatk1.0-0 libatk-bridge2.0-0 \
+      libatspi2.0-0 libdrm2 libxcb1 libx11-6 libxcomposite1 libxdamage1 libxext6 \
+      libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libnss3 libnspr4
+    python_bin="$(command -v python3)"
+  else
+    die "当前系统需要手动安装 Python 3.9+ 和 Chromium 运行库"
+  fi
+  [ -x "$APP_DIR/venv-douyin/bin/python" ] || "$python_bin" -m venv "$APP_DIR/venv-douyin"
+  "$APP_DIR/venv-douyin/bin/pip" install --timeout 30 --retries 2 \
+    -i "${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}" 'playwright==1.40.0'
+  PLAYWRIGHT_BROWSERS_PATH="$APP_DIR/pw-browsers" \
+    "$APP_DIR/venv-douyin/bin/python" -m playwright install chromium
+  chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR/venv-douyin" "$APP_DIR/pw-browsers"
+}
+
 public_ip() {
   # 阿里云 ECS 元数据服务；失败则退回公网出口 IP
   curl -fsS --max-time 2 http://100.100.100.200/latest/meta-data/eipv4 2>/dev/null \
@@ -327,6 +352,7 @@ main() {
   copy_app
   write_env
   fix_perms
+  install_douyin_resolver
   install_service
   verify_files
   if [ "${SKIP_SYSTEMD:-0}" = "1" ]; then

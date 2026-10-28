@@ -305,6 +305,7 @@ function resetWorkspace() {
   state.tabBatch = { link: null, erase: null, enhance: null, transcode: null };
   state.linkTasks = [];
   assetList = []; assetSel = new Set(); taskListData = [];
+  assetDeleteBusy = false;
   clearReferenceFiles();
   generationMonitorToken += 1;
   generationBusy = false;
@@ -1932,6 +1933,7 @@ function switchPage(page) {
 let assetRefreshTimer = null;
 let assetSearch = '';
 let assetSel = new Set();
+let assetDeleteBusy = false;
 
 async function loadAssets() {
   if (!el.assetGrid) return;
@@ -1976,6 +1978,8 @@ function renderAssets() {
   if (!el.assetGrid) return;
   const list = assetList.filter(assetMatches);
   const totalBytes = list.reduce((s2, a) => s2 + (Number(a.size) || 0), 0);
+  const clearAll = document.getElementById('assetClearAll');
+  if (clearAll) clearAll.disabled = assetDeleteBusy || assetList.length === 0;
   if (el.assetTotal) el.assetTotal.textContent = `共 ${list.length} 项 · ${fmtBytes(totalBytes)}`;
   el.assetEmpty.hidden = list.length > 0;
   el.assetGrid.innerHTML = '';
@@ -2012,7 +2016,7 @@ function renderAssets() {
       use.addEventListener('click', () => addAssetToCreation(a)); acts.appendChild(use);
     }
     const del = document.createElement('button'); del.type = 'button'; del.textContent = '删除';
-    del.disabled = a.state === 'saving';
+    del.disabled = assetDeleteBusy || a.state === 'saving';
     del.addEventListener('click', () => deleteAssets([a])); acts.appendChild(del);
     el.assetGrid.appendChild(card);
   }
@@ -2031,22 +2035,34 @@ function updateAssetSel() {
   if (el.assetSelAll) {
     el.assetSelAll.checked = list.length > 0 && list.every((a) => assetSel.has(a.id));
   }
-  if (el.assetBulkDelete) el.assetBulkDelete.disabled = assetSel.size === 0;
+  if (el.assetBulkDelete) el.assetBulkDelete.disabled = assetDeleteBusy || assetSel.size === 0;
 }
 
-async function deleteAssets(items) {
-  if (!items.length || !confirm(`删除这 ${items.length} 项资产？删除后无法恢复。`)) return;
-  let ok = 0;
-  const errors = [];
-  for (const asset of items) {
-    try {
-      await jsonApi(`/api/assets/${encodeURIComponent(asset.id)}`, { method: 'DELETE' });
-      ok += 1; assetSel.delete(asset.id);
-    } catch (err) { errors.push(err.message); }
+async function deleteAssets(items, {all = false} = {}) {
+  if (assetDeleteBusy || (!all && !items.length)) return;
+  if (!confirm(all ? '清空当前账号的全部资产？包括所有格式及分类，删除后无法恢复。正在生成或保存的素材会保留。' : `删除这 ${items.length} 项资产？删除后无法恢复。`)) return;
+  const requestEpoch = workspaceEpoch;
+  assetDeleteBusy = true; renderAssets();
+  try {
+    const result = await jsonApi('/api/assets/delete', {method:'POST',timeoutMs:180000,
+      body:JSON.stringify(all ? {all:true} : {assetIds:items.map((asset)=>asset.id)})});
+    if (requestEpoch !== workspaceEpoch) return;
+    for (const assetId of result.deletedIds) assetSel.delete(assetId);
+    const removedRefs = new Set(result.deletedReferenceIds || []);
+    for (let i = referenceFiles.length - 1; i >= 0; i -= 1) {
+      if (removedRefs.has(referenceFiles[i].referenceId)) {
+        URL.revokeObjectURL(referenceFiles[i].url); referenceFiles.splice(i,1);
+      }
+    }
+    renderReferencePreviews();
+    toast(`已删除 ${result.deletedIds.length} 项${result.skipped.length ? `，保留 ${result.skipped.length} 项：${result.skipped[0].error}` : ''}`);
+  } catch (err) { if (requestEpoch === workspaceEpoch) toast(`删除失败：${err.message}`); }
+  finally {
+    if (requestEpoch === workspaceEpoch) { assetDeleteBusy = false; await loadAssets(); }
   }
-  toast(`已删除 ${ok} 项${errors.length ? `；${errors[0]}` : ''}`);
-  await loadAssets();
 }
+
+document.getElementById('assetClearAll')?.addEventListener('click',()=>deleteAssets([], {all:true}));
 
 async function addAssetToCreation(asset) {
   if (generationBusy) { toast('请等待当前生成任务完成'); return; }
@@ -2368,6 +2384,8 @@ syncGenerationMode();
 
 function setGenerationLocked(locked) {
   generationBusy = locked;
+  const deleteButton = document.getElementById('generationDelete');
+  if (deleteButton) deleteButton.disabled = locked;
   if (homeGo) homeGo.disabled = locked;
   if (homeCmd) homeCmd.disabled = locked;
   if (referenceInput) referenceInput.disabled = locked || currentGenerationMode() === 'text';

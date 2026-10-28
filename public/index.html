@@ -7,7 +7,7 @@
 <meta name="description" content="ClipFlow AI 是一站式 AI 视频创作平台，支持文字与参考素材生成视频，并提供字幕处理、画质增强、视频压缩与资产管理。" />
 <meta name="color-scheme" content="light" />
 <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-<link rel="stylesheet" href="/styles.css?v=202610281713" />
+<link rel="stylesheet" href="/styles.css?v=202610281758" />
 </head>
 <body>
 
@@ -108,7 +108,7 @@
               <span>/</span>
               <label><select id="videoResolution" aria-label="清晰度"><option value="768p">768P</option><option value="480p">480P</option></select></label>
               <span>/</span>
-              <label><select id="videoDuration" aria-label="时长"><option value="5">5 秒</option><option value="10">10 秒</option><option value="15">15 秒</option></select></label>
+              <label><select id="videoDuration" aria-label="时长"><option value="3">3 秒</option><option value="5" selected>5 秒</option><option value="10">10 秒</option><option value="15">15 秒</option></select></label>
             </div>
 
             <div class="creation-actions">
@@ -330,6 +330,7 @@
             <label class="btn btn-ghost asset-upload">上传素材<input id="assetUpload" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm,audio/*" multiple hidden /></label>
             <input class="search2" id="assetSearch" placeholder="搜索资产名称…" />
             <span class="asset-total" id="assetTotal">共 0 项</span>
+            <button class="btn btn-ghost" type="button" id="assetClearAll">清空全部资产</button>
           </div>
         </div>
         <div class="asset-bulk" id="assetBulk" hidden>
@@ -385,7 +386,7 @@
   </div><!-- /shell -->
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/app.js?v=202610281713" type="module"></script>
+  <script src="/app.js?v=202610281758" type="module"></script>
   <div class="admin-mask" id="adminMask" hidden>
     <div class="admin-panel" role="dialog" aria-modal="true" aria-labelledby="adminTitle">
       <div class="admin-head">

@@ -97,7 +97,7 @@ const AUTODL_READY = Boolean(AUTODL_API_TOKEN && AUTODL_VIDEO_WORKFLOW && AUTODL
 const AUTODL_VIDEO_RESOLUTIONS = new Set([
   '480p竖', '768p竖',
 ]);
-const AUTODL_VIDEO_DURATIONS = new Set([5, 10, 15]);
+const AUTODL_VIDEO_DURATIONS = new Set([3, 5, 10, 15]);
 const VIDEO_GENERATION_MODES = new Set(['text', 'multi_image', 'keyframes']);
 const REFERENCE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.mp4', '.mov', '.m4v', '.webm', '.mp3', '.wav', '.m4a', '.flac']);
 const IMAGE_REFERENCE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
@@ -2515,7 +2515,37 @@ function ownedAsset(req, assetId) {
   return asset;
 }
 
+async function deleteAssetRecord(asset) {
+  const refs = Object.values(db.references).filter((ref) => ref.assetId === asset.id);
+  if (videoGenerationSubmissionLocks.has(asset.userId) || Object.values(db.videoGenerations).some((g) => VIDEO_GENERATION_ACTIVE.has(g.status)
+    && refs.some((ref) => g.referenceIds?.includes(ref.id)))) {
+    throw Object.assign(new Error('素材正在用于生成，请等待任务完成后删除'), {status:409});
+  }
+  if (assetSaves.has(asset.id)) throw Object.assign(new Error('资产正在保存，请稍后删除'), {status:409});
+  for (const ref of refs) delete db.references[ref.id];
+  for (const ref of refs) await fsp.rm(path.join(DATA_DIR, ref.storedPath), {force:true});
+  if (asset.storedPath) await fsp.rm(path.join(DATA_DIR, asset.storedPath), {force:true});
+  delete db.assets[asset.id];
+  db.assetTombstones[asset.id] = new Date().toISOString();
+  saveDb();
+  return refs.map((ref) => ref.id);
+}
+
 const ROUTES = {
+  'POST /api/assets/delete': async (req, res) => {
+    const body = await readJsonBody(req);
+    const userId = currentUser(req).id;
+    const assets = body.all === true
+      ? Object.values(db.assets).filter((asset) => asset.userId === userId)
+      : Array.isArray(body.assetIds) ? [...new Set(body.assetIds.map(String))].map((assetId) => ownedAsset(req, assetId)) : [];
+    if (body.all !== true && !assets.length) return sendError(res, 400, '请选择要删除的资产');
+    const deletedIds = [], deletedReferenceIds = [], skipped = [];
+    for (const asset of assets) {
+      try { deletedReferenceIds.push(...await deleteAssetRecord(asset)); deletedIds.push(asset.id); }
+      catch (err) { skipped.push({id:asset.id,error:err.message}); }
+    }
+    sendJson(res, 200, {deletedIds,deletedReferenceIds,skipped,total:assets.length});
+  },
   'GET /api/assets/:assetId/content': async (req, res, { params, url }) => {
     const asset = ownedAsset(req, params.assetId);
     if (asset.state !== 'ready') return sendError(res, 409, asset.error || '资产正在保存，请稍后重试');
@@ -2546,16 +2576,7 @@ const ROUTES = {
   },
   'DELETE /api/assets/:assetId': async (req, res, { params }) => {
     const asset = ownedAsset(req, params.assetId);
-    const refs = Object.values(db.references).filter((ref) => ref.assetId === asset.id);
-    if (Object.values(db.videoGenerations).some((g) => VIDEO_GENERATION_ACTIVE.has(g.status)
-      && refs.some((ref) => g.referenceIds?.includes(ref.id)))) return sendError(res, 409, '素材正在用于生成，请等待任务完成后删除');
-    if (assetSaves.has(asset.id)) return sendError(res, 409, '资产正在保存，请稍后删除');
-    for (const ref of refs) {
-      delete db.references[ref.id];
-      await fsp.rm(path.join(DATA_DIR, ref.storedPath), { force: true });
-    }
-    if (asset.storedPath) await fsp.rm(path.join(DATA_DIR, asset.storedPath), { force: true });
-    delete db.assets[asset.id]; db.assetTombstones[asset.id] = new Date().toISOString(); saveDb();
+    await deleteAssetRecord(asset);
     sendJson(res, 200, { deleted: true });
   },
   'GET /api/config': async (req, res) => {
@@ -2669,13 +2690,15 @@ const ROUTES = {
     if (parameters.duration != null) {
       const duration = Number(parameters.duration);
       if (!AUTODL_VIDEO_DURATIONS.has(duration)) {
-        return sendError(res, 400, '当前视频生成仅支持 5 秒、10 秒或 15 秒', { allowed: [...AUTODL_VIDEO_DURATIONS] });
+        return sendError(res, 400, '当前视频生成仅支持 3 秒、5 秒、10 秒或 15 秒', { allowed: [...AUTODL_VIDEO_DURATIONS] });
       }
       parameters.duration = duration;
     }
     if (videoGenerationSubmissionLocks.has(user.id)) {
       return sendError(res, 409, '当前视频正在提交，请勿重复点击');
     }
+    const latestActive = videoGenerationForUser(user.id, true);
+    if (latestActive) return sendError(res, 409, '当前视频仍在生成，请等待任务完成后再提交', {generation:serializeVideoGeneration(latestActive)});
     videoGenerationSubmissionLocks.add(user.id);
     const promptAssetId = `prompt:${id('text')}`;
     db.assets[promptAssetId] = { id: promptAssetId, userId: user.id, kind: 'text', ext: '.txt',
@@ -2754,7 +2777,7 @@ const ROUTES = {
   'DELETE /api/video-generations/:taskId': async (req, res, { params }) => {
     const generation = db.videoGenerations[params.taskId];
     if (!generation || generation.userId !== currentUser(req).id) return sendError(res, 404, '生成任务不存在');
-    if (VIDEO_GENERATION_ACTIVE.has(generation.status)) return sendError(res, 409, '生成中的任务暂不能删除');
+    if (videoGenerationSubmissionLocks.has(generation.userId) || VIDEO_GENERATION_ACTIVE.has(generation.status)) return sendError(res, 409, '生成中的任务暂不能删除');
     registerGenerationAssets(generation);
     generation.dismissedAt = new Date().toISOString(); saveDb();
     if (db.videoGenerationCurrent[generation.userId] === generation.taskId) db.videoGenerationCurrent[generation.userId] = null;

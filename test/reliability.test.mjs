@@ -77,7 +77,7 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
   const seed = { users: {}, sessions: {} };
-  for (const id of ['a','b','poor','admin','background','isolated','poll_error']) {
+  for (const id of ['a','b','poor','admin','background','isolated','poll_error','serial','bulk']) {
     seed.users[id] = { id, status:'active', role: id === 'admin' ? 'admin' : 'user', credits: id === 'poor' ? 0 : 100 };
     seed.sessions[id] = { userId:id, createdAt:new Date().toISOString(), expiresAt:Date.now()+30*60*1000 };
   }
@@ -169,7 +169,7 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     const invalidDuration = await api('/api/video-generations',{user:'admin',method:'POST',body:{
       mode:'text', workflow:'minimax_h3_lightx2v_no_pic', prompt:'invalid duration', parameters:{duration:7,resolution:'768p竖'}, referenceIds:[],
     }});
-    assert.equal(invalidDuration.status,400); assert.match(invalidDuration.data.error,/5 秒、10 秒或 15 秒/);
+    assert.equal(invalidDuration.status,400); assert.match(invalidDuration.data.error,/3 秒、5 秒、10 秒或 15 秒/);
     const text = await api('/api/video-generations',{user:'admin',method:'POST',body:{
       mode:'text', workflow:'minimax_h3_lightx2v_no_pic', prompt:'text prompt', referenceIds:[],
     }});
@@ -251,6 +251,38 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     assert.equal((await api(`/api/video-generations/${failure.taskId}`,{user:'poor',method:'DELETE'})).status,200);
     assert.equal((await api('/api/video-generations/current',{user:'poor'})).data.generation,null);
     assert.ok((await api('/api/assets',{user:'poor'})).data.assets.some(asset=>asset.text==='force submission failure'));
+  });
+  await t.test('asset batch deletion and clear-all are scoped to the owner and retain active references',async()=>{
+    const first=await uploadReference('bulk-one.jpg','bulk');
+    const second=await uploadReference('bulk-two.jpg','bulk');
+    const third=await uploadReference('bulk-three.jpg','bulk');
+    const foreign=await uploadReference('foreign.jpg','b');
+    const firstId=`reference:${first.id}`, secondId=`reference:${second.id}`;
+    assert.equal((await api('/api/assets/delete',{user:'bulk',method:'POST',body:{assetIds:[firstId,`reference:${foreign.id}`]}})).status,404);
+    assert.equal((await api(`/r/${first.id}`,{user:'bulk'})).status,200);
+    const selected=await api('/api/assets/delete',{user:'bulk',method:'POST',body:{assetIds:[firstId,secondId]}});
+    assert.equal(selected.status,200); assert.equal(selected.data.deletedIds.length,2);
+    assert.ok(selected.data.deletedReferenceIds.includes(first.id));
+    const clear=await api('/api/assets/delete',{user:'bulk',method:'POST',body:{all:true}});
+    assert.deepEqual(clear.data.deletedIds,[`reference:${third.id}`]);
+    assert.equal((await api('/api/assets',{user:'bulk'})).data.assets.length,0);
+    assert.equal((await api(`/r/${foreign.id}`,{user:'b'})).status,200);
+    const activeAsset=(await api('/api/assets')).data.assets.find((asset)=>asset.name==='a1.jpg');
+    const protectedResult=await api('/api/assets/delete',{method:'POST',body:{assetIds:[activeAsset.id]}});
+    assert.equal(protectedResult.data.deletedIds.length,0); assert.equal(protectedResult.data.skipped.length,1);
+  });
+  await t.test('a slow concurrent submission cannot create a second generation and active tasks cannot be deleted',async()=>{
+    const payload=JSON.stringify({mode:'text',prompt:'single task, three seconds',parameters:{duration:3,resolution:'768p竖'},referenceIds:[]});
+    const before=videoWorkflowCalls.length;
+    const slow=http.request(base+'/api/video-generations',{method:'POST',headers:{Cookie:'clp_sid=serial','Content-Type':'application/json'}});
+    const slowResult=new Promise((resolve,reject)=>{slow.on('response',async(res)=>{for await(const chunk of res) {} resolve(res.statusCode);});slow.on('error',reject);});
+    slow.write(payload.slice(0,10)); await sleep(100);
+    const first=await api('/api/video-generations',{user:'serial',method:'POST',body:JSON.parse(payload)});
+    assert.equal(first.status,202); slow.end(payload.slice(10));
+    assert.equal(await slowResult,409);
+    assert.equal(videoWorkflowCalls.length,before+1); assert.equal(videoWorkflowCalls.at(-1).input.duration,3);
+    assert.equal((await api(`/api/video-generations/${first.data.taskId}`,{user:'serial',method:'DELETE'})).status,409);
+    assert.equal((await api('/api/video-generations',{user:'serial',method:'POST',body:JSON.parse(payload)})).status,409);
   });
   const file=await upload(3.2);
   await t.test('raw media IDs require login and signed provider URLs are short-lived and owner-bound', async () => {

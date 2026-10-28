@@ -1412,6 +1412,7 @@ body{background:var(--canvas)}
 .creation-composer:focus-within{border-color:#b9b9c0;box-shadow:0 30px 80px -48px rgba(10,10,12,.44),0 0 0 4px rgba(10,10,12,.025)}
 .reference-previews{display:flex;align-items:flex-end;gap:12px;min-width:0;padding-bottom:15px;margin-bottom:12px;border-bottom:1px solid var(--line-2)}
 .reference-previews[hidden]{display:none}
+.recreation-help { margin: 12px 0 0; color: var(--ink-3); font-size: 12px; line-height: 1.7; }
 .reference-preview-list{display:flex;gap:9px;min-width:0;overflow-x:auto;padding:2px 2px 3px;scrollbar-width:none}
 .reference-preview-list::-webkit-scrollbar{display:none}
 .reference-preview-item{position:relative;width:68px;height:68px;flex:0 0 68px;overflow:hidden;border:1px solid rgba(255,255,255,.7);border-radius:13px;background:#ededf0;box-shadow:0 1px 3px rgba(10,10,12,.16)}
@@ -1480,6 +1481,12 @@ body{background:var(--canvas)}
 .generation-progress-track{height:7px;margin-top:24px;overflow:hidden;border-radius:999px;background:#ededf0}
 .generation-progress-track i{display:block;width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,#202024,#71717a);transition:width .7s ease}
 .generation-preview-panel.is-complete .generation-progress-track i{background:#1e9b65}
+.generation-batch-results { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; margin-top: 16px; }
+.generation-variant { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: #fafafa; text-align: left; cursor: pointer; }
+.generation-variant strong { font-size: 11px; font-weight: 600; }
+.generation-variant span { color: var(--ink-3); font-size: 10px; }
+.generation-variant.is-selected { border-color: #242426; background: #f0f0f2; }
+.generation-variant:disabled { cursor: default; opacity: .65; }
 .generation-preview-panel.is-failed .generation-progress-track i{background:#cf4c4c}
 .generation-progress-meta{display:flex;justify-content:space-between;gap:12px;margin-top:12px;color:var(--ink-2);font-size:10.5px}
 .generation-progress-card>p{margin-top:22px;color:var(--ink-4);font-size:9.5px;line-height:1.55}

@@ -25,6 +25,8 @@ import { Readable } from 'node:stream';
 import { enhanceVideo, runAsr, toSrt, runTranscode, runOcr, runToolVideo } from './pipeline.mjs';
 import { ZipStream, streamRemote } from './zip.mjs';
 import { probeVideoDuration, probeAvailable, probeVideoSize } from './media.mjs';
+import { assertRecreationVideo, validateRecreationReferences } from './recreation.mjs';
+import { createGenerationVariants, GENERATION_COUNTS } from './video-variants.mjs';
 import { normalizePhone, findUserByPhone, createUser, checkPassword, publicUser, createUserSession, chargeSeconds, refundSeconds, createCodes, redeemCode, ensureAdmin, setPassword, touchSession, SESSION_TTL_MS } from './accounts.mjs';
 import { take as takeToken, stats as rateStats } from './ratelimit.mjs';
 import { fileURLToPath } from 'node:url';
@@ -98,7 +100,7 @@ const AUTODL_VIDEO_RESOLUTIONS = new Set([
   '480p竖', '768p竖',
 ]);
 const AUTODL_VIDEO_DURATIONS = new Set([3, 5, 10, 15]);
-const VIDEO_GENERATION_MODES = new Set(['text', 'multi_image', 'keyframes']);
+const VIDEO_GENERATION_MODES = new Set(['text', 'multi_image', 'keyframes', 'recreation']);
 const REFERENCE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.mp4', '.mov', '.m4v', '.webm', '.mp3', '.wav', '.m4a', '.flac']);
 const IMAGE_REFERENCE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 /**
@@ -441,8 +443,10 @@ function saveDbSync() {
   savePending = false;
   try {
     fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+    return true;
   } catch (err) {
     console.error('[db] 写入失败', err.message);
+    return false;
   }
 }
 
@@ -1071,6 +1075,7 @@ function serializeReference(reference) {
     mime: reference.mime,
     size: reference.size,
     kind: reference.kind,
+    durationSec: reference.durationSec ?? null,
     url: publicReferenceUrl(reference.id),
     localUrl: `/r/${reference.id}`,
     createdAt: reference.createdAt,
@@ -1079,6 +1084,7 @@ function serializeReference(reference) {
 }
 
 async function handleReferenceUpload(req, res) {
+  const owner = currentUser(req);
   const diskCheck = diskGuard();
   if (!diskCheck.ok) return sendError(res, 507, diskLowMessage(diskCheck.free));
   const rawHeader = String(req.headers['x-file-name'] || 'reference.bin');
@@ -1114,14 +1120,25 @@ async function handleReferenceUpload(req, res) {
     return sendError(res, 400, '上传内容为空');
   }
   const kind = IMAGE_REFERENCE_EXT.has(ext) ? 'image' : ['.mp4', '.mov', '.m4v', '.webm'].includes(ext) ? 'video' : 'audio';
+  let durationSec = null;
+  if (kind === 'video') {
+    try {
+      durationSec = req.headers['x-reference-purpose'] === 'recreation'
+        ? await assertRecreationVideo(storedPath) : await probeVideoDuration(storedPath);
+    } catch (err) {
+      await fsp.rm(storedPath, {force:true});
+      return sendError(res, err.status || 422, err.message);
+    }
+  }
   const now = new Date();
   const reference = {
     id: referenceId,
-    userId: currentUser(req)?.id || null,
+    userId: owner.id,
     name,
     ext,
     mime: MIME[ext] || String(req.headers['content-type'] || 'application/octet-stream'),
     kind,
+    durationSec,
     size: received,
     storedPath: path.relative(DATA_DIR, storedPath),
     createdAt: now.toISOString(),
@@ -2288,7 +2305,7 @@ function safeWorkflowId(input) {
 }
 
 const VIDEO_GENERATION_ACTIVE = new Set(['SUBMITTING', 'QUEUED', 'RUNNING']);
-const VIDEO_GENERATION_TERMINAL = new Set(['SUCCESS', 'FAILED', 'ERROR', 'CANCELED', 'CANCELLED']);
+const VIDEO_GENERATION_TERMINAL = new Set(['SUCCESS', 'PARTIAL', 'FAILED', 'ERROR', 'CANCELED', 'CANCELLED']);
 const videoGenerationSubmissionLocks = new Set();
 
 function normalizeVideoGenerationStatus(value) {
@@ -2301,12 +2318,13 @@ function normalizeVideoGenerationStatus(value) {
 
 function videoGenerationForUser(userId, activeOnly = false) {
   return Object.values(db.videoGenerations)
-    .filter((item) => item.userId === userId && !item.dismissedAt && (!activeOnly || VIDEO_GENERATION_ACTIVE.has(item.status)))
+    .filter((item) => item.userId === userId && !item.batchId && !item.dismissedAt && (!activeOnly || VIDEO_GENERATION_ACTIVE.has(item.status)))
     .sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0))[0] || null;
 }
 
 function serializeVideoGeneration(item) {
   if (!item) return null;
+  if (item.isBatch) return serializeVideoBatch(item);
   const elapsed = Math.max(0, Math.floor((Date.now() - Date.parse(item.createdAt || Date.now())) / 1000));
   let estimatedProgress = 0;
   if (item.status === 'QUEUED' || item.status === 'SUBMITTING') estimatedProgress = Math.min(18, 5 + Math.floor(elapsed / 8));
@@ -2342,7 +2360,7 @@ const videoGenerationRefreshes = new Map();
 function refreshVideoGeneration(item) {
   if (!item || !item.taskId || VIDEO_GENERATION_TERMINAL.has(item.status)) return Promise.resolve(item);
   if (videoGenerationRefreshes.has(item.taskId)) return videoGenerationRefreshes.get(item.taskId);
-  const pending = fetchVideoGenerationStatus(item).catch((err) => {
+  const pending = (item.isBatch ? advanceVideoBatch(item) : fetchVideoGenerationStatus(item)).catch((err) => {
     item.pollingError = err.message;
     saveDb();
     throw err;
@@ -2356,7 +2374,7 @@ async function pollVideoGenerations() {
   if (!AUTODL_READY || pollingVideoGenerations) return;
   pollingVideoGenerations = true;
   try {
-    const active = Object.values(db.videoGenerations).filter((item) => VIDEO_GENERATION_ACTIVE.has(item.status));
+    const active = Object.values(db.videoGenerations).filter((item) => !item.batchId && VIDEO_GENERATION_ACTIVE.has(item.status));
     for (let index = 0; index < active.length; index += 2) {
       await Promise.allSettled(active.slice(index, index + 2).map(refreshVideoGeneration));
     }
@@ -2388,6 +2406,136 @@ async function fetchVideoGenerationStatus(item) {
   return item;
 }
 
+async function persistVideoCheckpoint() {
+  const deadline = Date.now() + 10000;
+  while (saveWriting) {
+    if (Date.now() > deadline) throw new Error('任务状态暂时无法保存，已停止继续提交');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  if (!saveDbSync()) throw new Error('任务状态保存失败，已停止继续提交');
+}
+
+function deduplicateBatchVariants(batch) {
+  const seen = new Map();
+  let changed = false;
+  for (const variant of batch.variants) {
+    if (variant.status !== 'SUCCESS') continue;
+    const child = db.videoGenerations[variant.taskId];
+    const keys = resultVideoUrls(child?.results).flatMap((url, index) => {
+      const checksum = db.assets[`generation:${child.taskId}:${index}`]?.sha256;
+      return [`url:${url}`, ...(checksum ? [`sha256:${checksum}`] : [])];
+    });
+    const repeatedKey=keys.find((key)=>seen.has(key));
+    if (repeatedKey) {
+      variant.status = 'DUPLICATE';
+      variant.error = '服务商返回了与本批次其他版本相同的视频，已标记重复，不计入有效结果';
+      for (const asset of Object.values(db.assets)) {
+        if (asset.id?.startsWith(`generation:${child.taskId}:`)) asset.duplicateOf=seen.get(repeatedKey);
+      }
+      changed = true;
+    } else { keys.forEach((key) => seen.set(key,variant.taskId)); }
+  }
+  return changed;
+}
+
+function finishVideoBatch(batch) {
+  const successCount = batch.variants.filter((variant) => variant.status === 'SUCCESS').length;
+  batch.status = successCount === batch.count ? 'SUCCESS' : successCount ? 'PARTIAL' : 'FAILED';
+  batch.updatedAt = new Date().toISOString();
+  saveDb();
+}
+
+function serializeVideoBatch(batch) {
+  if (deduplicateBatchVariants(batch)) {
+    if (VIDEO_GENERATION_TERMINAL.has(batch.status)) finishVideoBatch(batch);
+    else saveDb();
+  }
+  const variants = batch.variants.map((variant) => {
+    const child = variant.taskId ? db.videoGenerations[variant.taskId] : null;
+    const serialized = child && child.userId === batch.userId && child.batchId === batch.taskId ? serializeVideoGeneration(child) : null;
+    return {index:variant.index, title:variant.title, lighting:variant.lighting, camera:variant.camera,
+      background:variant.background, status:variant.status, error:variant.error || serialized?.error || null,
+      results:variant.status === 'SUCCESS' ? serialized?.results || [] : [],
+      estimatedProgress:serialized?.estimatedProgress || 0};
+  });
+  const completedCount = variants.filter((variant) => !['PENDING', 'SUBMITTING', 'QUEUED', 'RUNNING'].includes(variant.status)).length;
+  const successCount = variants.filter((variant) => variant.status === 'SUCCESS').length;
+  const current = variants.find((variant) => ['SUBMITTING','QUEUED','RUNNING'].includes(variant.status));
+  const active = VIDEO_GENERATION_ACTIVE.has(batch.status);
+  return {taskId:batch.taskId, isBatch:true, count:batch.count, status:batch.status,
+    mode:batch.mode, prompt:batch.prompt, parameters:batch.parameters, createdAt:batch.createdAt,
+    duration:Math.max(0, Math.floor((Date.parse(active ? new Date().toISOString() : batch.updatedAt) - Date.parse(batch.createdAt)) / 1000)),
+    variants, completedCount, successCount, failedCount:completedCount-successCount,
+    activeIndex:current?.index ?? null, results:variants.flatMap((variant) => variant.results),
+    error:batch.error || null, errorCode:batch.errorCode || null, failureStage:batch.failureStage || null,
+    pollingError:batch.pollingError || null,
+    estimatedProgress:active ? Math.min(99, Math.round((completedCount * 100 + (current?.estimatedProgress || 0)) / batch.count)) : 100};
+}
+
+async function advanceVideoBatch(batch) {
+  if (batch.pollingError) delete batch.pollingError;
+  for (const variant of batch.variants) {
+    if (['SUCCESS','FAILED','SKIPPED','DUPLICATE'].includes(variant.status)) continue;
+    if (variant.taskId) {
+      const child = db.videoGenerations[variant.taskId];
+      if (!child || child.userId !== batch.userId || child.batchId !== batch.taskId) throw new Error('批次子任务记录不完整，已暂停提交后续任务');
+      await refreshVideoGeneration(child);
+      variant.status = child.status;
+      variant.error = child.error || null;
+      if (VIDEO_GENERATION_ACTIVE.has(child.status)) { saveDb(); return batch; }
+      if (!VIDEO_GENERATION_TERMINAL.has(child.status)) throw new Error('云端任务状态尚不明确，已暂停后续提交');
+      if (child.status === 'SUCCESS' && !resultVideoUrls(child.results).length) {
+        variant.status = 'FAILED'; variant.error = '云端任务完成，但未返回可用的视频地址';
+      }
+      deduplicateBatchVariants(batch);
+      saveDb();
+      continue;
+    }
+    if (variant.status === 'SUBMITTING') {
+      variant.status = 'FAILED';
+      variant.error = '上次提交中断且未取得云端任务号。为避免重复计费，已停止自动提交，请先核对服务商记录';
+      batch.error = variant.error; batch.failureStage = 'submission';
+      batch.variants.filter((item) => item.status === 'PENDING').forEach((item) => {item.status='SKIPPED';item.error='前序提交状态不明确，未提交';});
+      finishVideoBatch(batch); return batch;
+    }
+    variant.status = 'SUBMITTING'; batch.status = 'RUNNING';
+    batch.updatedAt = new Date().toISOString();
+    let upstream;
+    try {
+      const references = batch.referenceIds.map((referenceId) => db.references[referenceId]);
+      if (references.some((reference) => !reference || reference.userId !== batch.userId)) throw new Error('批次参考素材不存在，已停止提交');
+      const parameters = {...variant.parameters};
+      if (batch.mode === 'multi_image') references.forEach((reference,index) => {parameters[`ref_image_${index}`]=publicReferenceUrl(reference.id);});
+      else if (batch.mode === 'keyframes') {
+        parameters.first_frame=publicReferenceUrl(references[0].id); parameters.last_frame=publicReferenceUrl(references[1].id);
+      }
+      await persistVideoCheckpoint();
+      upstream = await autodlRequest(`/comfyui_workflow/${encodeURIComponent(batch.workflow)}`, {method:'POST',body:{...parameters,prompt:variant.prompt}});
+      if (upstream?.code !== 'Success' || !upstream?.data?.task_id) throw new Error(upstream?.msg || 'AutoDL 未返回任务 ID');
+      if (db.videoGenerations[upstream.data.task_id]) throw new Error('服务商返回了已存在的任务号，已停止后续提交');
+    } catch (err) {
+      variant.status='FAILED'; variant.error=err.message;
+      batch.error=err.message; batch.errorCode=err.errorCode || 'BATCH_SUBMISSION_FAILED'; batch.failureStage='submission';
+      batch.variants.filter((item)=>item.status==='PENDING').forEach((item)=>{item.status='SKIPPED';item.error='前序提交失败，未继续提交';});
+      finishVideoBatch(batch); return batch;
+    }
+    const child = {taskId:upstream.data.task_id, userId:batch.userId, batchId:batch.taskId,
+      prompt:variant.prompt, promptAssetId:batch.promptAssetId, workflow:batch.workflow, mode:batch.mode,
+      parameters:variant.parameters, referenceIds:[...batch.referenceIds],
+      status:normalizeVideoGenerationStatus(upstream.data.status || 'QUEUED'),
+      createdAt:upstream.data.created_at || new Date().toISOString(), updatedAt:new Date().toISOString(),
+      results:Array.isArray(upstream.data.results) ? upstream.data.results : []};
+    db.videoGenerations[child.taskId]=child;
+    variant.taskId=child.taskId; variant.status=child.status;
+    registerGenerationAssets(child);
+    await persistVideoCheckpoint();
+    return batch;
+  }
+  deduplicateBatchVariants(batch);
+  finishVideoBatch(batch);
+  return batch;
+}
+
 const assetSaves = new Map();
 const assetSavePool = createPool(2, 'asset-save');
 const assetKindForExt = (ext) => IMAGE_REFERENCE_EXT.has(ext) ? 'image'
@@ -2397,6 +2545,7 @@ const assetKindForExt = (ext) => IMAGE_REFERENCE_EXT.has(ext) ? 'image'
 function serializeAsset(asset) {
   const url = `/api/assets/${encodeURIComponent(asset.id)}/content`;
   return { id: asset.id, name: asset.name, kind: asset.kind, ext: asset.ext, source: asset.source,
+    duplicate:!!asset.duplicateOf,
     size: asset.size || 0, sizeText: formatBytes(asset.size || 0), createdAt: asset.createdAt,
     state: asset.state, error: asset.error || null, url, downloadUrl: `${url}?dl=1`,
     thumbUrl: asset.kind === 'image' && asset.state === 'ready' ? url : null,
@@ -2449,8 +2598,14 @@ function scheduleAssetSave(asset, sourcePath = null) {
       if (!db.assets[asset.id]) { await fsp.rm(tmp, { force: true }); return; }
       const stat = await fsp.stat(tmp);
       if (!stat.size) throw new Error('资产文件为空');
+      let sha256 = null;
+      if (asset.source === 'generation') {
+        const hash = crypto.createHash('sha256');
+        for await (const chunk of fs.createReadStream(tmp)) hash.update(chunk);
+        sha256 = hash.digest('hex');
+      }
       await fsp.rename(tmp, dest);
-      Object.assign(asset, { storedPath: path.relative(DATA_DIR, dest), size: stat.size, state: 'ready', error: null });
+      Object.assign(asset, { storedPath: path.relative(DATA_DIR, dest), size: stat.size, state: 'ready', error: null, ...(sha256 ? {sha256} : {}) });
       delete asset.remoteUrl;
     } catch (err) {
       await fsp.rm(tmp, { force: true });
@@ -2475,7 +2630,7 @@ function registerGenerationAssets(generation) {
       text: generation.prompt, size: Buffer.byteLength(generation.prompt), state: 'ready',
       source: 'prompt', createdAt: generation.createdAt };
   }
-  if (generation.status !== 'SUCCESS') return;
+  if (generation.isBatch || generation.status !== 'SUCCESS') return;
   [...new Set(resultVideoUrls(generation.results))].slice(0, 20).forEach((url, index) => {
     const assetId = `generation:${generation.taskId}:${index}`;
     if (db.assetTombstones[assetId]) return;
@@ -2559,17 +2714,20 @@ const ROUTES = {
   },
   'POST /api/assets/:assetId/reference': async (req, res, { params }) => {
     const asset = ownedAsset(req, params.assetId);
+    const body = await readJsonBody(req);
     if (asset.state !== 'ready') return sendError(res, 409, '资产尚未保存完成');
     if (asset.kind === 'text') {
       const text = asset.text ?? await fsp.readFile(path.join(DATA_DIR, asset.storedPath), 'utf8');
       return sendJson(res, 200, { text });
     }
     if (!REFERENCE_EXT.has(asset.ext)) return sendError(res, 415, '此格式暂不能添加到参考区');
+    const durationSec = asset.kind === 'video' && body.purpose === 'recreation'
+      ? await assertRecreationVideo(path.join(DATA_DIR, asset.storedPath)) : null;
     const referenceId = id('ref');
     const dest = path.join(REFERENCE_DIR, `${referenceId}${asset.ext}`);
     await fsp.copyFile(path.join(DATA_DIR, asset.storedPath), dest);
     const reference = { id: referenceId, userId: asset.userId, name: asset.name, ext: asset.ext,
-      kind: asset.kind, mime: asset.mime, size: asset.size, assetId: asset.id, persistent: true,
+      kind: asset.kind, durationSec, mime: asset.mime, size: asset.size, assetId: asset.id, persistent: true,
       expiresAt: null, createdAt: new Date().toISOString(), storedPath: path.relative(DATA_DIR, dest) };
     db.references[reference.id] = reference; saveDb();
     sendJson(res, 201, { reference: serializeReference(reference) });
@@ -2608,6 +2766,11 @@ const ROUTES = {
       eraseReady: eraseApi.ready,
       eraseMissing: eraseApi.missing.map((m) => (m === 'AMK_API_KEY' ? '去字幕接口密钥' : '公网访问入口')),
       videoGeneration: {
+        counts:[...GENERATION_COUNTS],
+        recreation: {
+          ready: false, maxVideoSeconds: 15, maxVideos: 1, maxImages: 9,
+          reason: '当前已接入的 MiniMax H3 工作流仅接受图片。保留原动作的视频复刻需要支持视频输入的 H3 工作流，尚待接入。',
+        },
         ready: AUTODL_READY,
         provider: 'AutoDL ComfyUI',
         workflow: AUTODL_VIDEO_WORKFLOW,
@@ -2641,19 +2804,25 @@ const ROUTES = {
       return sendError(res, 409, '当前视频正在提交，请勿重复点击');
     }
     const body = await readJsonBody(req);
+    const count = Number(body.count ?? 1);
+    if (!GENERATION_COUNTS.has(count)) return sendError(res, 400, '生成条数仅支持 1、2、3、5、10 条');
     const prompt = String(body.prompt || '').trim();
     if (!prompt) return sendError(res, 400, '请输入视频描述');
     if (prompt.length > 1000) return sendError(res, 400, '视频描述不能超过 1000 字');
     const mode = String(body.mode || '').trim();
     if (!VIDEO_GENERATION_MODES.has(mode)) return sendError(res, 400, '请选择有效的生成方式');
     const referenceIds = Array.isArray(body.referenceIds) ? [...new Set(body.referenceIds.map(String))] : [];
-    if (referenceIds.length > 9) return sendError(res, 400, '多图生视频最多支持 9 张参考图片');
+    if (referenceIds.length > (mode === 'recreation' ? 10 : 9)) return sendError(res, 400, '参考素材数量超过当前生成方式上限');
     const references = referenceIds.map((referenceId) => db.references[referenceId]);
     if (references.some((reference) => !reference || reference.userId !== user.id)) {
       return sendError(res, 404, '参考素材不存在或不属于当前账号');
     }
     if (references.some((reference) => reference.expiresAt && Date.parse(reference.expiresAt) <= Date.now())) {
       return sendError(res, 410, '参考素材已过期，请重新上传');
+    }
+    if (mode === 'recreation') {
+      await validateRecreationReferences(references, {dataDir: DATA_DIR, replacementTarget: body.replacementTarget});
+      return sendError(res, 503, '当前 MiniMax H3 视频参考工作流尚未接入，暂不能提交保留原动作的视频复刻任务', {errorCode:'RECREATION_WORKFLOW_NOT_CONFIGURED'});
     }
     if (references.some((reference) => reference.kind !== 'image' || !IMAGE_REFERENCE_EXT.has(reference.ext))) {
       return sendError(res, 415, '视频生成参考文件仅支持 JPG、PNG、WebP 图片');
@@ -2705,6 +2874,18 @@ const ROUTES = {
       mime: 'text/plain; charset=utf-8', name: `提示词-${prompt.slice(0, 24)}.txt`, text: prompt,
       size: Buffer.byteLength(prompt), state: 'ready', source: 'prompt', createdAt: new Date().toISOString() };
     saveDb();
+    if (count > 1) {
+      const batch = {taskId:id('vbatch'),isBatch:true,count,userId:user.id,status:'QUEUED',
+        prompt,promptAssetId,workflow,mode,parameters,referenceIds,
+        createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),
+        variants:createGenerationVariants({prompt,parameters,count,mode})};
+      db.videoGenerations[batch.taskId]=batch;
+      db.videoGenerationCurrent[user.id]=batch.taskId;
+      try { await refreshVideoGeneration(batch); }
+      catch (err) { batch.pollingError=err.message; saveDb(); }
+      finally { videoGenerationSubmissionLocks.delete(user.id); }
+      return sendJson(res,202,serializeVideoGeneration(batch));
+    }
     let upstream;
     const saveSubmissionFailure = (err) => {
       const failed = { taskId: id('submission'), userId: user.id, status: 'FAILED', prompt, promptAssetId,
@@ -2757,7 +2938,7 @@ const ROUTES = {
   'GET /api/video-generations/current': async (req, res) => {
     const user = currentUser(req);
     if (!Object.hasOwn(db.videoGenerationCurrent, user.id)) {
-      const latest = Object.values(db.videoGenerations).filter((item) => item.userId === user.id)
+      const latest = Object.values(db.videoGenerations).filter((item) => item.userId === user.id && !item.batchId)
         .sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0))[0];
       db.videoGenerationCurrent[user.id] = latest && !latest.dismissedAt ? latest.taskId : null; saveDb();
     }
@@ -2777,8 +2958,16 @@ const ROUTES = {
   'DELETE /api/video-generations/:taskId': async (req, res, { params }) => {
     const generation = db.videoGenerations[params.taskId];
     if (!generation || generation.userId !== currentUser(req).id) return sendError(res, 404, '生成任务不存在');
+    if (generation.batchId && VIDEO_GENERATION_ACTIVE.has(db.videoGenerations[generation.batchId]?.status)) return sendError(res,409,'所属批次仍在生成，暂不能删除子任务');
     if (videoGenerationSubmissionLocks.has(generation.userId) || VIDEO_GENERATION_ACTIVE.has(generation.status)) return sendError(res, 409, '生成中的任务暂不能删除');
     registerGenerationAssets(generation);
+    if (generation.isBatch) {
+      for (const variant of generation.variants) {
+        const child=db.videoGenerations[variant.taskId];
+        if (!child || child.userId !== generation.userId || child.batchId !== generation.taskId) continue;
+        registerGenerationAssets(child); child.dismissedAt=new Date().toISOString();
+      }
+    }
     generation.dismissedAt = new Date().toISOString(); saveDb();
     if (db.videoGenerationCurrent[generation.userId] === generation.taskId) db.videoGenerationCurrent[generation.userId] = null;
     sendJson(res, 200, { deleted: true, assetsRetained: true });

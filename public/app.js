@@ -329,6 +329,10 @@ function resetWorkspace() {
   if (el.settingsMenu) el.settingsMenu.hidden = true;
   const assetUploadInput = document.getElementById('assetUpload');
   if (assetUploadInput) { assetUploadInput.value = ''; assetUploadInput.disabled = false; }
+  const countInput = document.getElementById('videoCount');
+  if (countInput) countInput.value = '1';
+  const batchHint = document.getElementById('generationBatchHint');
+  if (batchHint) batchHint.hidden = true;
   state.config = null;
 }
 
@@ -1994,7 +1998,7 @@ function renderAssets() {
           ? `<audio src="${escapeHtml(a.url)}" preload="none" controls></audio>`
           : a.kind === 'text' && a.text ? `<p class="asset-text-preview">${escapeHtml(a.text)}</p>` : ASSET_ICON[a.kind] || '▶';
     const origin = ({upload:'上传', generation:'生成', prompt:'提示词', process:'处理'})[a.source] || '素材';
-    const status = a.state === 'saving' ? '正在保存…' : a.state === 'failed' ? '保存失败，可重新加载重试' : '已保存';
+    const status = a.duplicate ? '重复结果，不计入批次有效视频' : a.state === 'saving' ? '正在保存…' : a.state === 'failed' ? '保存失败，可重新加载重试' : '已保存';
     card.innerHTML = `
       <div class="a-thumb">${thumb}<span class="a-badge">${origin}</span>
         <span class="a-kind">${assetKindLabel(a.kind)}</span>
@@ -2067,22 +2071,25 @@ document.getElementById('assetClearAll')?.addEventListener('click',()=>deleteAss
 async function addAssetToCreation(asset) {
   if (generationBusy) { toast('请等待当前生成任务完成'); return; }
   try {
-    if (asset.kind !== 'text' && referenceFiles.length >= (currentGenerationMode() === 'keyframes' ? 2 : 9)) {
+    if (asset.kind === 'video' && referenceFiles.some((item)=>item.kind==='video')) { toast('视频复刻只能添加 1 个参考视频'); return; }
+    const maxReferences = currentGenerationMode() === 'recreation' || asset.kind === 'video' ? 10 : currentGenerationMode() === 'keyframes' ? 2 : 9;
+    if (asset.kind !== 'text' && referenceFiles.length >= maxReferences) {
       toast('参考素材数量已达上限，请先移除部分参考'); return;
     }
-    const data = await jsonApi(`/api/assets/${encodeURIComponent(asset.id)}/reference`, { method: 'POST', body: '{}' });
+    const data = await jsonApi(`/api/assets/${encodeURIComponent(asset.id)}/reference`, { method: 'POST', body: JSON.stringify(asset.kind === 'video' ? {purpose:'recreation'} : {}) });
     if (data.text !== undefined) {
       homeCmd.value = data.text;
       homeCmd.dispatchEvent(new Event('input'));
     } else {
       const ref = data.reference;
-      if (currentGenerationMode() === 'text') { generationModeSelect.value = 'multi_image'; syncGenerationMode(); }
-      referenceFiles.push({ id: nextReferenceId(), referenceId: ref.id, kind: ref.kind,
+      if (ref.kind === 'video') { generationModeSelect.value = 'recreation'; syncGenerationMode(); }
+      else if (currentGenerationMode() === 'text') { generationModeSelect.value = 'multi_image'; syncGenerationMode(); }
+      referenceFiles.push({ id: nextReferenceId(), referenceId: ref.id, kind: ref.kind, durationSec:ref.durationSec,
         file: { name: ref.name, size: ref.size, type: ref.mime }, url: ref.localUrl });
       renderReferencePreviews();
     }
     switchPage('home'); window.scrollTo({ top: 0, behavior: 'smooth' });
-    toast(asset.kind === 'text' ? '提示词已填入创作区' : asset.kind === 'image' ? '已添加到创作参考' : '已添加到参考区；当前生成模型仅支持图片参考');
+    toast(asset.kind === 'text' ? '提示词已填入创作区' : asset.kind === 'image' ? '已添加到创作参考' : asset.kind === 'video' ? '已添加到视频复刻参考区；生成服务待开通' : '已添加到参考区；当前生成模型不支持音频参考');
   } catch (err) { toast(err.message); }
 }
 
@@ -2247,6 +2254,7 @@ function referenceKind(file) {
   const name = String((file && file.name) || '').toLowerCase();
   const extension = name.includes('.') ? name.split('.').pop() : '';
   if (['jpg', 'jpeg', 'png', 'webp'].includes(extension)) return 'image';
+  if (currentGenerationMode() === 'recreation' && ['mp4', 'mov', 'm4v', 'webm'].includes(extension)) return 'video';
   return null;
 }
 
@@ -2264,25 +2272,40 @@ function syncGenerationMode({ clear = false } = {}) {
   if (clear) clearReferenceFiles();
   const mode = currentGenerationMode();
   const textOnly = mode === 'text';
+  const recreation = mode === 'recreation';
+  if (referenceInput) referenceInput.accept = recreation
+    ? 'image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm,.jpg,.jpeg,.png,.webp,.mp4,.mov,.m4v,.webm'
+    : 'image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp';
+  const targetControl = document.getElementById('recreationTargetControl');
+  if (targetControl) targetControl.hidden = !recreation;
+  const help = document.getElementById('recreationHelp');
+  if (help) help.hidden = !recreation;
+  if (homeGo) {
+    homeGo.disabled = generationBusy || (recreation && !state.config?.videoGeneration?.recreation?.ready);
+    homeGo.title = recreation && !state.config?.videoGeneration?.recreation?.ready ? '视频参考生成功能暂未开通' : '生成视频';
+  }
   if (referenceInput) referenceInput.disabled = textOnly || generationBusy;
   referenceTrigger?.classList.toggle('is-disabled', textOnly);
   if (referenceTrigger) {
     referenceTrigger.title = textOnly
       ? '文生视频无需参考图片'
-      : mode === 'keyframes' ? '添加首帧与尾帧图片' : '添加 1–9 张参考图片';
+      : recreation ? '添加 1 个最长 15 秒的视频和 1–9 张替换图片'
+        : mode === 'keyframes' ? '添加首帧与尾帧图片' : '添加 1–9 张参考图片';
   }
   const status = document.getElementById('generationStatus');
   if (status && !generationBusy) {
     status.textContent = textOnly
       ? '文生视频无需参考文件，输入描述即可生成'
-      : mode === 'keyframes'
+      : recreation ? '视频复刻暂未开通；可先准备 1 个最长 15 秒的参考视频与替换图片'
+        : mode === 'keyframes'
         ? '请添加正好 2 张图片：第一张作为首帧，第二张作为尾帧'
         : '请添加 1–9 张 JPG、PNG 或 WebP 参考图片';
   }
   if (homeCmd) {
     homeCmd.placeholder = textOnly
       ? '描述主体、动作、场景、镜头与光影……'
-      : mode === 'keyframes'
+      : recreation ? '描述要替换的物体或背景，以及需要保留的动作和镜头……'
+        : mode === 'keyframes'
         ? '描述从首帧到尾帧的主体动作、镜头运动和场景过渡……'
         : '说明每张参考图的用途，并描述主体、动作、场景和镜头……';
   }
@@ -2296,18 +2319,22 @@ function renderReferencePreviews() {
   const mode = currentGenerationMode();
   if (referencePreviewCount) referencePreviewCount.textContent = mode === 'keyframes'
     ? `${referenceFiles.length} / 2 帧`
-    : `${referenceFiles.length} / 9 张`;
+    : mode === 'recreation' ? `${referenceFiles.filter((item)=>item.kind==='video').length} / 1 视频 · ${referenceFiles.filter((item)=>item.kind==='image').length} / 9 图片`
+      : `${referenceFiles.length} / 9 张`;
   for (const [index, item] of referenceFiles.entries()) {
     const card = document.createElement('div');
     card.className = `reference-preview-item is-${item.kind}`;
     card.title = item.file.name;
     const media = document.createElement(item.kind === 'video' ? 'video' : item.kind === 'audio' ? 'span' : 'img');
     if (item.kind === 'audio') { media.className = 'reference-audio-glyph'; media.textContent = '♫'; }
-    else { media.src = item.url; media.preload = 'metadata'; }
+    else { media.src = item.url; media.preload = 'metadata'; if (item.kind === 'video') { media.muted = true; media.playsInline = true; } }
     card.appendChild(media);
     const label = document.createElement('span');
     label.className = 'reference-preview-label';
-    label.textContent = mode === 'keyframes' ? (index === 0 ? '首帧' : '尾帧') : `${({image:'图片',video:'视频',audio:'音频'})[item.kind]} ${index + 1}`;
+    label.textContent = mode === 'keyframes' ? (index === 0 ? '首帧' : '尾帧')
+      : mode === 'recreation' ? item.kind === 'video' ? `参考视频${item.durationSec ? ` · ${item.durationSec.toFixed(1)}s` : ''}`
+        : document.getElementById('recreationTarget')?.value === 'background' ? '背景参考图' : '主体参考图'
+        : `${({image:'图片',video:'视频',audio:'音频'})[item.kind]} ${index + 1}`;
     card.appendChild(label);
     const remove = document.createElement('button');
     remove.type = 'button'; remove.className = 'reference-preview-remove'; remove.dataset.referenceId = item.id;
@@ -2318,9 +2345,11 @@ function renderReferencePreviews() {
 }
 
 if (referenceInput) {
-  referenceInput.addEventListener('change', () => {
+  referenceInput.addEventListener('change', async () => {
+    const requestEpoch = workspaceEpoch;
+    const mode = currentGenerationMode();
     const incoming = Array.from(referenceInput.files || []);
-    const max = currentGenerationMode() === 'keyframes' ? 2 : 9;
+    const max = mode === 'keyframes' ? 2 : mode === 'recreation' ? 10 : 9;
     let rejected = 0;
     let added = 0;
     const newItems = [];
@@ -2328,8 +2357,12 @@ if (referenceInput) {
       const kind = referenceKind(file);
       const duplicate = referenceFiles.some((item) => item.file.name === file.name && item.file.size === file.size && item.file.lastModified === file.lastModified);
       if (!kind || duplicate || referenceFiles.length >= max) { rejected += 1; continue; }
+      if (mode === 'recreation' && referenceFiles.filter((item)=>item.kind===kind).length >= (kind === 'video' ? 1 : 9)) { rejected += 1; continue; }
       try {
-        const item = { id: nextReferenceId(), kind, file, url: URL.createObjectURL(file) };
+        const durationSec = kind === 'video' ? await probeDuration(file) : null;
+        if (requestEpoch !== workspaceEpoch || mode !== currentGenerationMode()) return;
+        if (kind === 'video' && (!durationSec || durationSec > 15)) { rejected += 1; toast('参考视频必须可读取且时长不超过 15 秒'); continue; }
+        const item = { id: nextReferenceId(), kind, file, durationSec, url: URL.createObjectURL(file) };
         referenceFiles.push(item); newItems.push(item);
         added += 1;
       } catch {
@@ -2345,17 +2378,18 @@ if (referenceInput) {
         .then(() => { if (uploadEpoch === workspaceEpoch && !document.getElementById('pageAssets')?.hidden) loadAssets(); })
         .catch((err) => {
           item.uploadPromise = null;
-          if (uploadEpoch === workspaceEpoch) toast(`参考图片保存失败：${err.message}`);
+          if (uploadEpoch === workspaceEpoch) toast(`参考素材保存失败：${err.message}`);
         });
     }
-    if (added) toast(`已添加 ${added} 张参考图片，正在保存到资产`);
-    if (rejected) toast(`已跳过 ${rejected} 张重复、格式不支持或超过数量限制的图片`);
+    if (added) toast(`已添加 ${added} 个参考素材，正在保存到资产`);
+    if (rejected) toast(`已跳过 ${rejected} 个重复、无效或超出限制的素材`);
   });
 }
 generationModeSelect?.addEventListener('change', () => {
   syncGenerationMode({ clear: true });
   toast(`已切换为${generationModeSelect.options[generationModeSelect.selectedIndex].text}`);
 });
+document.getElementById('recreationTarget')?.addEventListener('change', renderReferencePreviews);
 referencePreviewList?.addEventListener('click', (event) => {
   const remove = event.target.closest('[data-reference-id]');
   if (!remove) return;
@@ -2378,6 +2412,7 @@ function firstResultUrl(value) {
 
 const ACTIVE_GENERATION_STATES = new Set(['SUBMITTING', 'QUEUED', 'RUNNING']);
 let currentHomeGeneration = null;
+let selectedGenerationVariant = null;
 let generationBusy = false;
 let generationMonitorToken = 0;
 syncGenerationMode();
@@ -2386,11 +2421,11 @@ function setGenerationLocked(locked) {
   generationBusy = locked;
   const deleteButton = document.getElementById('generationDelete');
   if (deleteButton) deleteButton.disabled = locked;
-  if (homeGo) homeGo.disabled = locked;
+  if (homeGo) homeGo.disabled = locked || (currentGenerationMode() === 'recreation' && !state.config?.videoGeneration?.recreation?.ready);
   if (homeCmd) homeCmd.disabled = locked;
   if (referenceInput) referenceInput.disabled = locked || currentGenerationMode() === 'text';
   referenceTrigger?.classList.toggle('is-disabled', locked || currentGenerationMode() === 'text');
-  for (const id of ['videoWorkflow', 'generationMode', 'videoRatio', 'videoResolution', 'videoDuration']) {
+  for (const id of ['videoWorkflow', 'generationMode', 'videoRatio', 'videoResolution', 'videoDuration', 'videoCount', 'recreationTarget']) {
     const control = document.getElementById(id);
     if (control) control.disabled = locked;
   }
@@ -2403,7 +2438,7 @@ function setGenerationLocked(locked) {
 function generationStatusText(status) {
   return ({
     SUBMITTING: '正在提交', QUEUED: '等待云端资源', RUNNING: '正在生成视频',
-    SUCCESS: '视频生成完成', FAILED: '视频生成失败', ERROR: '视频生成失败',
+    SUCCESS: '视频生成完成', PARTIAL:'部分视频生成完成', FAILED: '视频生成失败', ERROR: '视频生成失败',
     CANCELED: '任务已取消', CANCELLED: '任务已取消',
   })[status] || '正在处理';
 }
@@ -2432,14 +2467,39 @@ function renderGenerationPreview(generation) {
   const status = String(generation.status || 'QUEUED').toUpperCase();
   const active = ACTIVE_GENERATION_STATES.has(status);
   const deleteButton = document.getElementById('generationDelete');
-  if (deleteButton) deleteButton.hidden = active;
+  if (deleteButton) {deleteButton.hidden = active;deleteButton.textContent=generation.isBatch ? '删除批次' : '删除任务';}
   const failed = ['FAILED', 'ERROR', 'CANCELED', 'CANCELLED'].includes(status);
   const canceled = ['CANCELED', 'CANCELLED'].includes(status);
   const rawProgress = generation.estimatedProgress;
   const hasProgress = rawProgress !== null && rawProgress !== undefined && Number.isFinite(Number(rawProgress));
-  const progress = status === 'SUCCESS' ? 100 : hasProgress ? Math.max(0, Math.min(99, Number(rawProgress))) : 0;
-  const progressLabel = failed ? (canceled ? '已取消' : '失败') : `${Math.round(progress)}%`;
-  const resultUrl = status === 'SUCCESS' ? firstResultUrl(generation.results) : null;
+  const progress = status === 'SUCCESS' ? 100 : generation.isBatch && status === 'PARTIAL'
+    ? Math.round(generation.successCount/generation.count*100)
+    : failed ? 0 : hasProgress ? Math.max(0, Math.min(99, Number(rawProgress))) : 0;
+  const progressLabel = generation.isBatch && !active ? `${generation.successCount}/${generation.count} 条`
+    : failed ? (canceled ? '已取消' : '失败') : `${Math.round(progress)}%`;
+  const variants = generation.isBatch ? generation.variants || [] : [];
+  let selected = variants.find((variant) => selectedGenerationVariant?.taskId === generation.taskId && variant.index === selectedGenerationVariant.index && firstResultUrl(variant.results));
+  if (!selected) selected = variants.find((variant) => firstResultUrl(variant.results));
+  if (selected) selectedGenerationVariant = {taskId:generation.taskId,index:selected.index};
+  const resultUrl = generation.isBatch ? firstResultUrl(selected?.results) : status === 'SUCCESS' ? firstResultUrl(generation.results) : null;
+  const batchResults = document.getElementById('generationBatchResults');
+  if (batchResults) {
+    batchResults.hidden = !generation.isBatch;
+    batchResults.replaceChildren();
+    const labels = {PENDING:'等待开始',SUBMITTING:'正在提交',QUEUED:'云端排队',RUNNING:'正在生成',SUCCESS:'点击预览',FAILED:'失败',SKIPPED:'未提交',DUPLICATE:'结果重复'};
+    for (const variant of variants) {
+      const button = document.createElement('button'); button.type='button';
+      button.className='generation-variant' + (selected?.index === variant.index ? ' is-selected' : '');
+      button.disabled=!firstResultUrl(variant.results);
+      button.title=variant.error || `${variant.lighting}；${variant.camera}；${variant.background}`;
+      const title=document.createElement('strong');title.textContent=`第 ${variant.index+1} 条 · ${variant.title}`;
+      const stateLabel=document.createElement('span');stateLabel.textContent=labels[variant.status] || variant.status;
+      button.append(title,stateLabel);
+      button.addEventListener('click',()=>{selectedGenerationVariant={taskId:generation.taskId,index:variant.index};renderGenerationPreview(currentHomeGeneration);});
+      batchResults.appendChild(button);
+    }
+  }
+  if (active && document.getElementById('videoCount')) document.getElementById('videoCount').value=String(generation.count || 1);
   const createdAt = Date.parse(generation.createdAt || '') || Date.now();
   const elapsed = generation.duration ?? Math.max(0, Math.floor((Date.now() - createdAt) / 1000));
   const resolution = generation.parameters?.resolution || '—';
@@ -2456,7 +2516,7 @@ function renderGenerationPreview(generation) {
   }
   const stageTitle = failed && generation.failureStage === 'submission' ? '任务提交失败' : generationStatusText(status);
   if (generationProgressTitle) generationProgressTitle.textContent = stageTitle;
-  if (generationProgressSpec) generationProgressSpec.textContent = [resolution, duration].filter(Boolean).join(' · ');
+  if (generationProgressSpec) generationProgressSpec.textContent = [resolution, duration, generation.isBatch ? `${generation.count} 条` : ''].filter(Boolean).join(' · ');
   if (generationElapsed) generationElapsed.textContent = `已耗时 ${Math.max(0, Math.round(Number(elapsed) || 0))} 秒`;
   if (generationStageLabel) generationStageLabel.textContent = stageTitle;
   if (generationStageDetail) {
@@ -2476,8 +2536,19 @@ function renderGenerationPreview(generation) {
         ? '云端任务已完成，并已返回生成结果。'
         : '当前接口不返回精确百分比，进度为根据任务状态与已耗时计算的预计值。';
   }
+  if (generation.isBatch) {
+    const batchTitle = active ? `正在生成第 ${(generation.activeIndex ?? 0)+1} / ${generation.count} 条` : generationStatusText(status);
+    if (generationProgressTitle) generationProgressTitle.textContent=batchTitle;
+    if (generationStageLabel) generationStageLabel.textContent=batchTitle;
+    if (generationStageDetail) generationStageDetail.textContent=generation.pollingError
+      ? `暂时无法更新任务状态：${generation.pollingError}`
+      : `已结束 ${generation.completedCount}/${generation.count} 条，成功 ${generation.successCount} 条${generation.failedCount ? `，失败、重复或未提交 ${generation.failedCount} 条` : ''}${generation.error ? `。${generation.error}` : ''}`;
+    if (generationProgressNote) generationProgressNote.textContent=active
+      ? '本批次依次生成，每条使用不同的镜头、光线和场景细节；完成的版本可点击预览。每条按服务商规则独立计费。'
+      : '本批次已结束，成功的视频已保存到资产。失败或重复结果不会自动付费重试。';
+  }
   if (resultUrl && generationVideo) {
-    if (generationVideo.getAttribute('src') !== resultUrl) generationVideo.src = resultUrl;
+    if (generationVideo.getAttribute('src') !== resultUrl) { generationVideo.pause(); generationVideo.src = resultUrl; }
     generationVideo.hidden = false;
     if (generationPreviewEmpty) generationPreviewEmpty.hidden = true;
   } else {
@@ -2491,7 +2562,7 @@ function renderGenerationPreview(generation) {
   if (generationPreviewStage) generationPreviewStage.dataset.status = status.toLowerCase();
   const statusLine = document.getElementById('generationStatus');
   if (statusLine) statusLine.textContent = active
-    ? `${generationStatusText(status)} · 当前仅支持一个生成任务`
+    ? generation.isBatch ? `本批次 ${generation.count} 条正在依次生成 · 完成前不能提交新批次` : `${generationStatusText(status)} · 当前仅支持一个生成任务`
     : generationStatusText(status);
 }
 
@@ -2523,6 +2594,9 @@ async function monitorGeneration(initial) {
 
 function clearGenerationPreview() {
   currentHomeGeneration = null;
+  selectedGenerationVariant = null;
+  const batchResults=document.getElementById('generationBatchResults');
+  if (batchResults) {batchResults.replaceChildren();batchResults.hidden=true;}
   generationVideo?.pause(); generationVideo?.removeAttribute('src'); generationVideo?.load();
   if (generationPreview) generationPreview.hidden = true;
   setGenerationLocked(false); syncGenerationMode();
@@ -2574,6 +2648,7 @@ async function uploadVideoReference(item, index, total, { silent = false } = {})
     headers: {
       'content-type': item.file.type || 'application/octet-stream',
       'x-file-name': encodeURIComponent(item.file.name),
+      ...(currentGenerationMode() === 'recreation' ? {'x-reference-purpose':'recreation'} : {}),
     },
     body: item.file,
   });
@@ -2582,6 +2657,7 @@ async function uploadVideoReference(item, index, total, { silent = false } = {})
   if (response.status === 401) showLogin('会话已过期，请重新登录');
   if (!response.ok) throw Object.assign(new Error(data.error || `参考素材上传失败（HTTP ${response.status}）`), { status: response.status, data });
   item.referenceId = data.reference.id;
+  item.durationSec = data.reference.durationSec ?? item.durationSec;
   return data.reference;
 }
 
@@ -2598,7 +2674,13 @@ async function runHomeCommand() {
     return;
   }
   const mode = currentGenerationMode();
-  if (referenceFiles.some((item) => item.kind !== 'image')) { toast('当前生成接口仅接受图片参考，请移除视频和音频后生成'); return; }
+  if (mode === 'recreation' && !state.config?.videoGeneration?.recreation?.ready) {
+    toast('视频参考生成功能暂未开通，请先完成模型接口接入'); return;
+  }
+  if (mode !== 'recreation' && referenceFiles.some((item) => item.kind !== 'image')) { toast('当前生成接口仅接受图片参考，请移除视频和音频后生成'); return; }
+  if (mode === 'recreation' && (referenceFiles.filter((item)=>item.kind==='video').length !== 1 || referenceFiles.filter((item)=>item.kind==='image').length < 1 || referenceFiles.some((item)=>item.kind==='audio'))) {
+    toast('视频复刻需要 1 个最长 15 秒的视频和 1–9 张替换图片'); return;
+  }
   if (mode === 'text' && referenceFiles.length) {
     toast('文生视频不需要参考图片，请移除图片后再提交');
     return;
@@ -2615,11 +2697,12 @@ async function runHomeCommand() {
   const ratio = document.getElementById('videoRatio')?.value || '9:16';
   const resolution = document.getElementById('videoResolution')?.value || '768p';
   const duration = Number(document.getElementById('videoDuration')?.value || 5);
+  const count = Number(document.getElementById('videoCount')?.value || 1);
   const resolutionOption = ratio === '1:1'
     ? `${resolution.toLowerCase()}(1:1)`
     : `${resolution.toLowerCase()}${ratio === '9:16' ? '竖' : '横'}`;
   const workflow = state.config?.videoGeneration?.workflows?.[mode]
-    || (mode === 'text'
+    || (mode === 'recreation' ? null : mode === 'text'
       ? document.getElementById('videoWorkflow')?.value
       : mode === 'keyframes' ? state.config?.videoGeneration?.keyframeWorkflow : state.config?.videoGeneration?.imageWorkflow);
   if (!workflow) {
@@ -2655,8 +2738,10 @@ async function runHomeCommand() {
       method: 'POST',
       body: JSON.stringify({
         prompt: command,
+        count,
         mode,
         workflow,
+        ...(mode === 'recreation' ? {replacementTarget:document.getElementById('recreationTarget')?.value || 'subject'} : {}),
         parameters: { duration, resolution: resolutionOption },
         referenceIds: uploadedReferences.map((reference) => reference.id),
       }),
@@ -2666,6 +2751,16 @@ async function runHomeCommand() {
     monitorGeneration(created);
   } catch (err) {
     if (requestEpoch !== workspaceEpoch) return;
+    if (err.code === 'TIMEOUT') {
+      if (status) status.textContent='提交响应超时，正在确认云端任务状态…';
+      try {
+        const recovered=await jsonApi('/api/video-generations/current',{timeoutMs:35000});
+        if (requestEpoch !== workspaceEpoch) return;
+        if (recovered.generation && ACTIVE_GENERATION_STATES.has(recovered.generation.status)) {
+          monitorGeneration(recovered.generation);toast('已恢复云端任务，不会重复提交');return;
+        }
+      } catch { /* 确认失败后保留超时错误；服务端仍会拒绝重复的活动任务。 */ }
+    }
     if (err.status === 409 && err.data?.generation) {
       monitorGeneration(err.data.generation);
       toast('已有视频正在生成，已恢复当前任务');
@@ -2714,6 +2809,11 @@ function syncPreviewSpec() {
   if (spec) spec.textContent = `${ratio} · ${duration} 秒 · ${resolution.toUpperCase()}`;
 }
 ['videoRatio', 'videoDuration', 'videoResolution'].forEach((id) => document.getElementById(id)?.addEventListener('change', syncPreviewSpec));
+document.getElementById('videoCount')?.addEventListener('change', () => {
+  const count=Number(document.getElementById('videoCount').value);
+  const hint=document.getElementById('generationBatchHint');
+  if (hint) {hint.hidden=count===1;hint.textContent=`将依次生成 ${count} 条独立视频，变化镜头、光线和场景细节；每条分别计费。批次完成前不能删除或再次提交。`;}
+});
 
 /* ============================================================================
  * 任务中心

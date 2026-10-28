@@ -10,6 +10,7 @@ import { once } from 'node:events';
 import vm from 'node:vm';
 import { enhanceVideo, runTranscode, runToolVideo, runAsr, runOcr } from '../pipeline.mjs';
 import { probeVideoDuration } from '../media.mjs';
+import { createGenerationVariants } from '../video-variants.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function until(fn, timeout = 10000) {
@@ -34,6 +35,8 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'clipflow-test-'));
   const upstreamTasks = new Map();
   const videoWorkflowCalls = [];
+  const generationJobs = new Map();
+  const videoSubmissionAttempts = [];
   let serial = 0;
   const upstream = http.createServer(async (req, res) => {
     const json = (body) => { res.setHeader('Content-Type','application/json'); res.end(JSON.stringify(body)); };
@@ -43,17 +46,23 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     if (req.method === 'GET' && req.url === '/comfy/comfyui_workflow/result/video_poll_error') {
       res.statusCode=401; return json({message:'invalid token'});
     }
+    if (req.method === 'GET' && req.url.startsWith('/comfy/comfyui_workflow/result/')) {
+      const job=generationJobs.get(decodeURIComponent(req.url.split('/').at(-1)));
+      if (job) return json({code:'Success',data:job});
+    }
     if (req.url.startsWith('/asset')) { res.setHeader('Content-Length','2048'); res.end(req.method === 'HEAD' ? undefined : Buffer.alloc(2048)); return; }
     if (req.method === 'POST' && req.url.startsWith('/comfy/comfyui_workflow/')) {
       let raw = ''; for await (const chunk of req) raw += chunk;
       const workflow = decodeURIComponent(req.url.slice('/comfy/comfyui_workflow/'.length));
       const input = JSON.parse(raw);
-      if (input.prompt === 'force submission failure') {
+      videoSubmissionAttempts.push(input);
+      if (input.prompt.startsWith('force submission failure')) {
         res.statusCode = 402;
         return json({ message:'Insufficient account balance' });
       }
       const taskId = `video_${videoWorkflowCalls.length + 1}`;
       videoWorkflowCalls.push({ workflow, input, taskId });
+      generationJobs.set(taskId,{status:'QUEUED',results:[]});
       return json({ code:'Success', data:{ task_id:taskId, status:'QUEUED', created_at:new Date().toISOString() }, msg:'' });
     }
     if (req.method === 'POST' && req.url.startsWith('/tools/')) {
@@ -77,7 +86,7 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
   const seed = { users: {}, sessions: {} };
-  for (const id of ['a','b','poor','admin','background','isolated','poll_error','serial','bulk']) {
+  for (const id of ['a','b','poor','admin','background','isolated','poll_error','serial','bulk','recreation','variants','duplicates','batch_failure','ten_variants','bad_count','uncertain_batch']) {
     seed.users[id] = { id, status:'active', role: id === 'admin' ? 'admin' : 'user', credits: id === 'poor' ? 0 : 100 };
     seed.sessions[id] = { userId:id, createdAt:new Date().toISOString(), expiresAt:Date.now()+30*60*1000 };
   }
@@ -85,6 +94,9 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
   await fs.writeFile(path.join(dir, 'assets', 'saved-video.mp4'), Buffer.alloc(2048, 7));
   seed.videoGenerationCurrent = {isolated:'video_finished'};
   seed.videoGenerations = { video_background: {taskId:'video_background',userId:'background',status:'RUNNING',results:[],createdAt:new Date().toISOString()},
+    interrupted_batch: {taskId:'interrupted_batch',userId:'uncertain_batch',isBatch:true,count:2,status:'RUNNING',
+      prompt:'interrupted',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),referenceIds:[],
+      variants:[{index:0,status:'SUBMITTING',taskId:null},{index:1,status:'PENDING',taskId:null}]},
     video_poll_error: {taskId:'video_poll_error',userId:'poll_error',status:'RUNNING',results:[],createdAt:new Date().toISOString()},
     video_finished: { taskId:'video_finished', userId:'a', status:'SUCCESS',
     prompt:'保留在资产中的提示词', results:[], createdAt:new Date().toISOString() },
@@ -147,6 +159,9 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     assert.equal(polling.status,'RUNNING');
     assert.match(polling.pollingError,/暂时无法查询任务状态/);
     assert.doesNotMatch(polling.pollingError,/任务未创建/);
+    const uncertain=(await api('/api/video-generations/current',{user:'uncertain_batch'})).data.generation;
+    assert.equal(uncertain.status,'FAILED');assert.match(uncertain.error,/避免重复计费/);
+    assert.equal(uncertain.variants[1].status,'SKIPPED');assert.equal(videoSubmissionAttempts.length,0);
   });
 
   await t.test('malformed cookies and path escapes do not terminate the server; session cookie renews',async()=>{
@@ -283,6 +298,89 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     assert.equal(videoWorkflowCalls.length,before+1); assert.equal(videoWorkflowCalls.at(-1).input.duration,3);
     assert.equal((await api(`/api/video-generations/${first.data.taskId}`,{user:'serial',method:'DELETE'})).status,409);
     assert.equal((await api('/api/video-generations',{user:'serial',method:'POST',body:JSON.parse(payload)})).status,409);
+  });
+  await t.test('recreation requires one real video of at most 15 seconds and replacement images without falling back to image generation',async()=>{
+    const uploadVideo=async(duration,purpose='recreation')=>api('/api/video-references',{user:'recreation',method:'POST',raw:String(duration),
+      headers:{'X-File-Name':'reference.mp4','Content-Type':'video/mp4','x-reference-purpose':purpose}});
+    const before=videoWorkflowCalls.length;
+    const longUpload=await uploadVideo(15.01);
+    assert.equal(longUpload.status,400); assert.match(longUpload.data.error,/15 秒/);
+    const genericLong=await uploadVideo(16,'asset'); assert.equal(genericLong.status,201);
+    const video=await uploadVideo(15); assert.equal(video.status,201);
+    assert.equal(video.data.reference.durationSec,15);
+    const image=await uploadReference('replacement.jpg','recreation');
+    const post=(refs,target='subject')=>api('/api/video-generations',{user:'recreation',method:'POST',body:{
+      mode:'recreation',prompt:'保留动作，替换主体',replacementTarget:target,referenceIds:refs}});
+    assert.equal((await post([image.id])).status,400);
+    assert.equal((await post([video.data.reference.id])).status,400);
+    assert.equal((await post([genericLong.data.reference.id,image.id])).status,400);
+    assert.equal((await post([video.data.reference.id,image.id],'invalid')).status,400);
+    const result=await post([video.data.reference.id,image.id],'background');
+    assert.equal(result.status,503); assert.equal(result.data.errorCode,'RECREATION_WORKFLOW_NOT_CONFIGURED');
+    assert.equal(videoWorkflowCalls.length,before);
+    assert.equal((await api('/api/video-generations/current',{user:'recreation'})).data.generation,null);
+    const reuse=await api(`/api/assets/${encodeURIComponent('reference:'+genericLong.data.reference.id)}/reference`,{
+      user:'recreation',method:'POST',body:{purpose:'recreation'}});
+    assert.equal(reuse.status,400);
+    const config=await api('/api/config'); assert.equal(config.data.videoGeneration.recreation.ready,false);
+  });
+  await t.test('a variant batch submits sequentially, survives restart and retains independent results',async()=>{
+    const image=await uploadReference('batch-subject.jpg','variants');
+    const before=videoWorkflowCalls.length;
+    const request={mode:'multi_image',prompt:'同一商品的三种展示',count:3,referenceIds:[image.id],parameters:{duration:3,resolution:'768p竖'}};
+    const created=await api('/api/video-generations',{user:'variants',method:'POST',body:request});
+    assert.equal(created.status,202); assert.equal(created.data.isBatch,true); assert.equal(created.data.count,3);
+    const parentId=created.data.taskId;
+    assert.equal(videoWorkflowCalls.length,before+1);
+    assert.equal((await api('/api/video-generations',{user:'variants',method:'POST',body:request})).status,409);
+    assert.equal((await api(`/api/video-generations/${parentId}`,{user:'variants',method:'DELETE'})).status,409);
+    await Promise.all(Array.from({length:4},()=>api('/api/video-generations/current',{user:'variants'})));
+    assert.equal(videoWorkflowCalls.length,before+1);
+    const finish=(offset,url)=>generationJobs.set(videoWorkflowCalls[before+offset].taskId,{status:'SUCCESS',results:[{url,type:'video'}]});
+    finish(0,`http://127.0.0.1:${upstream.address().port}/asset/variation-1`);
+    let current=(await api('/api/video-generations/current',{user:'variants'})).data.generation;
+    assert.equal(current.successCount,1); assert.equal(videoWorkflowCalls.length,before+2);
+    assert.equal((await api(`/api/video-generations/${videoWorkflowCalls[before].taskId}`,{user:'variants',method:'DELETE'})).status,409);
+    child.kill('SIGTERM'); await once(child,'exit'); child=launch();
+    await until(async()=>{try{return (await fetch(base+'/api/auth/session')).ok;}catch{return false;}});
+    await api('/api/video-generations/current',{user:'variants'});
+    assert.equal(videoWorkflowCalls.length,before+2);
+    finish(1,`http://127.0.0.1:${upstream.address().port}/asset/variation-2`);
+    await api('/api/video-generations/current',{user:'variants'});
+    assert.equal(videoWorkflowCalls.length,before+3);
+    finish(2,`http://127.0.0.1:${upstream.address().port}/asset/variation-3`);
+    current=(await api('/api/video-generations/current',{user:'variants'})).data.generation;
+    assert.equal(current.status,'SUCCESS'); assert.equal(current.successCount,3); assert.equal(current.results.length,3);
+    const calls=videoWorkflowCalls.slice(before,before+3);
+    assert.equal(new Set(calls.map((call)=>call.input.prompt)).size,3);
+    assert.equal(new Set(calls.map((call)=>call.input.seed)).size,3);
+    assert.ok(calls.every((call)=>call.input.ref_image_0.includes(`/r/${image.id}`)));
+    assert.equal((await api(`/api/video-generations/${parentId}`,{user:'admin'})).status,404);
+    const assets=(await api('/api/assets',{user:'variants'})).data.assets;
+    assert.ok(calls.every((call)=>assets.some((asset)=>asset.id===`generation:${call.taskId}:0`)));
+    assert.equal((await api(`/api/video-generations/${parentId}`,{user:'variants',method:'DELETE'})).status,200);
+    assert.equal((await api('/api/video-generations/current',{user:'variants'})).data.generation,null);
+  });
+  await t.test('batch submissions stop on rejection, report duplicate results and validate count',async()=>{
+    const beforeAttempts=videoSubmissionAttempts.length;
+    const failure=await api('/api/video-generations',{user:'batch_failure',method:'POST',body:{mode:'text',prompt:'force submission failure',count:5}});
+    assert.equal(failure.status,202);assert.equal(failure.data.status,'FAILED');
+    assert.equal(videoSubmissionAttempts.length,beforeAttempts+1);
+    assert.equal(failure.data.variants.filter((variant)=>variant.status==='SKIPPED').length,4);
+    const invalid=await api('/api/video-generations',{user:'bad_count',method:'POST',body:{mode:'text',prompt:'test',count:4}});
+    assert.equal(invalid.status,400);
+    const before=videoWorkflowCalls.length;
+    const created=await api('/api/video-generations',{user:'duplicates',method:'POST',body:{mode:'text',prompt:'same result defense',count:2}});
+    assert.equal(created.status,202);
+    const url=`http://127.0.0.1:${upstream.address().port}/asset/same-result`;
+    generationJobs.set(videoWorkflowCalls[before].taskId,{status:'SUCCESS',results:[{url}]});
+    await api('/api/video-generations/current',{user:'duplicates'});
+    generationJobs.set(videoWorkflowCalls[before+1].taskId,{status:'SUCCESS',results:[{url}]});
+    const current=(await api('/api/video-generations/current',{user:'duplicates'})).data.generation;
+    assert.equal(current.status,'PARTIAL');assert.equal(current.successCount,1);assert.equal(current.results.length,1);
+    assert.equal(current.variants[1].status,'DUPLICATE');
+    const ten=await api('/api/video-generations',{user:'ten_variants',method:'POST',body:{mode:'text',prompt:'ten variants',count:10}});
+    assert.equal(ten.status,202);assert.equal(ten.data.variants.length,10);
   });
   const file=await upload(3.2);
   await t.test('raw media IDs require login and signed provider URLs are short-lived and owner-bound', async () => {
@@ -552,7 +650,7 @@ test('a reference upload from an old account cannot mutate the new workspace', a
   const end = source.indexOf('async function runHomeCommand()',start);
   let finish;
   const context = vm.createContext({workspaceEpoch:1,
-    fetch:()=>new Promise(resolve=>{finish=resolve;}), showLogin:()=>{throw new Error('old response must not log out new user');},
+    currentGenerationMode:()=> 'multi_image',fetch:()=>new Promise(resolve=>{finish=resolve;}), showLogin:()=>{throw new Error('old response must not log out new user');},
   });
   vm.runInContext(source.slice(start,end),context);
   const item = {file:{name:'reference.jpg',type:'image/jpeg'}};
@@ -603,4 +701,27 @@ test('the comparison divider moves correctly from either endpoint using the keyb
   key('ArrowRight'); assert.equal(stage.dataset.split,'2');
   key('End'); assert.equal(stage.dataset.split,'100');
   key('ArrowLeft'); assert.equal(stage.dataset.split,'98');
+});
+
+test('ten variants use distinct directions and seeds while preserving keyframe constraints',()=>{
+  const variants=createGenerationVariants({prompt:'保留人物与产品，固定原场景',parameters:{duration:5},count:10,mode:'keyframes'});
+  assert.equal(new Set(variants.map((variant)=>variant.prompt)).size,10);
+  assert.equal(new Set(variants.map((variant)=>variant.parameters.seed)).size,10);
+  assert.equal(new Set(variants.map((variant)=>variant.camera)).size,10);
+  assert.ok(variants.every((variant)=>variant.prompt.includes('首帧与尾帧图片是固定约束') && variant.prompt.startsWith('保留人物与产品')));
+  assert.throws(()=>createGenerationVariants({prompt:'test',parameters:{},count:4,mode:'text'}),/生成条数/);
+});
+
+test('identical generated file hashes are marked duplicate even when result URLs differ',async()=>{
+  const source=await fs.readFile('server.mjs','utf8');
+  const start=source.indexOf('function deduplicateBatchVariants(');
+  const end=source.indexOf('\nfunction finishVideoBatch(',start);
+  const context=vm.createContext({db:{videoGenerations:{first:{taskId:'first',results:[{url:'https://one.example/video.mp4'}]},
+    second:{taskId:'second',results:[{url:'https://two.example/video.mp4'}]}},
+    assets:{'generation:first:0':{sha256:'same-file-hash'},'generation:second:0':{sha256:'same-file-hash'}}},
+    resultVideoUrls:(results)=>(results||[]).map((result)=>result.url)});
+  vm.runInContext(source.slice(start,end),context);
+  const batch={variants:[{taskId:'first',status:'SUCCESS'},{taskId:'second',status:'SUCCESS'}]};
+  assert.equal(context.deduplicateBatchVariants(batch),true);
+  assert.equal(batch.variants[0].status,'SUCCESS');assert.equal(batch.variants[1].status,'DUPLICATE');
 });

@@ -294,7 +294,12 @@ function resetWorkspace() {
   clearInterval(state.tickTimer); state.tickTimer = null;
   clearTimeout(assetRefreshTimer); assetRefreshTimer = null;
   clearInterval(taskPollTimer); taskPollTimer = null;
+  for (const item of state.items || []) {
+    item.canceled = true;
+    try { item.xhr?.abort?.(); } catch { /* 请求可能已经结束 */ }
+  }
   state.items = []; state.batchId = null; state.batch = null; state.rows = [];
+  lastSig = '';
   state.syncing = false; state.tab = 'link';
   state.openKey = null; state.downloading.clear(); state.selected.clear();
   state.tabBatch = { link: null, erase: null, enhance: null, transcode: null };
@@ -304,7 +309,7 @@ function resetWorkspace() {
   generationMonitorToken += 1;
   generationBusy = false;
   clearGenerationPreview();
-  for (const selector of ['#assetGrid', '#taskList', '#list', '#homeRecent', '#toolRecent', '#referencePreviews']) {
+  for (const selector of ['#assetGrid', '#taskList', '#list', '#homeAssets', '#toolsRecent', '#homeRecent', '#toolRecent']) {
     const node = document.querySelector(selector);
     if (!node) continue;
     node.querySelectorAll('video,audio').forEach((media) => { media.pause(); media.removeAttribute('src'); media.load(); });
@@ -316,9 +321,13 @@ function resetWorkspace() {
   if (el.fileInput) el.fileInput.value = '';
   if (el.linkInputs) el.linkInputs.value = '';
   if (homeCmd) homeCmd.value = '';
+  const promptCount = document.getElementById('promptCount');
+  if (promptCount) promptCount.textContent = '0';
   if (referenceInput) referenceInput.value = '';
   if (el.adminMask) el.adminMask.hidden = true;
   if (el.settingsMenu) el.settingsMenu.hidden = true;
+  const assetUploadInput = document.getElementById('assetUpload');
+  if (assetUploadInput) { assetUploadInput.value = ''; assetUploadInput.disabled = false; }
   state.config = null;
 }
 
@@ -390,6 +399,7 @@ async function md5BlobLazy(file, onProgress) {
 }
 
 async function acceptFiles(fileList) {
+  const requestEpoch = workspaceEpoch;
   // 上传前积分预检（本地读时长，不发请求）：1 秒 = 1 积分
   {
     const probeFiles = [...(fileList || [])].filter(Boolean);
@@ -409,6 +419,7 @@ async function acceptFiles(fileList) {
         } catch { resolve(0); }
       });
       const durations = await Promise.all(probeFiles.map(probe));
+      if (requestEpoch !== workspaceEpoch) return;
       const need = durations.reduce((sum, d) => sum + Math.max(1, Math.ceil(d || 0)), 0);
       const credits = me?.credits ?? 0;
         if (need > 0 && credits < need) {
@@ -752,6 +763,7 @@ function renderNow() {
     return;
   }
   lastSig = sig;
+  el.list.querySelectorAll('video,audio').forEach((media) => media.pause());
   el.list.innerHTML = '';
   rows.forEach((r) => {
     el.list.appendChild(rowNode(r));
@@ -945,6 +957,14 @@ function panelNode(r) {
   // 播放失败（编码不支持、链接过期、文件被清）→ 换成说明 + 下载入口，不留死播放器
   wrap.querySelectorAll('video').forEach((v) => {
     const swap = () => {
+      if (compareReady) {
+        const stage = wrap.querySelector('.video-compare');
+        wrap.querySelectorAll('video').forEach((media) => media.pause());
+        if (stage) stage.innerHTML = previewFallback(v.classList.contains('compare-source') ? 'src' : 'tgt', r);
+        const controls = wrap.querySelector('.compare-controls');
+        if (controls) controls.hidden = true;
+        return;
+      }
       const fig = v.closest('.preview');
       const isSrc = Boolean(v.closest('.preview-item:first-child'));
       if (fig) fig.innerHTML = previewFallback(isSrc ? 'src' : 'tgt', r);
@@ -988,7 +1008,7 @@ function bindVideoCompare(wrap) {
   divider.addEventListener('pointerup', () => { dragging = false; });
   divider.addEventListener('pointercancel', () => { dragging = false; });
   divider.addEventListener('keydown', (event) => {
-    const split = Number(stage.dataset.split) || 50;
+    const split = Number(stage.dataset.split ?? 50);
     if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') { setSplit(split - 2); event.preventDefault(); }
     else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') { setSplit(split + 2); event.preventDefault(); }
     else if (event.key === 'Home') { setSplit(0); event.preventDefault(); }
@@ -1458,6 +1478,7 @@ async function restore() {
       return;
     }
     if (loginPending) return;
+    loginPending = true;
     markBusy(el.loginBtn, authMode === 'register' ? '正在注册…' : '正在登录…');
     try {
       const body = { phone, password };
@@ -1493,6 +1514,7 @@ async function restore() {
       el.authError.textContent = err.message || '操作失败';
       el.authError.hidden = false;
     } finally {
+      loginPending = false;
       clearBusy(el.loginBtn);
     }
   }
@@ -2049,20 +2071,27 @@ async function addAssetToCreation(asset) {
 }
 
 document.getElementById('assetUpload')?.addEventListener('change', async (event) => {
+  const requestEpoch = workspaceEpoch;
   const files = Array.from(event.target.files || []);
   event.target.disabled = true;
   let count = 0;
   try {
     for (const file of files) {
+      if (requestEpoch !== workspaceEpoch) return;
       const response = await fetch('/api/video-references', { method: 'POST', credentials: 'same-origin',
         headers: { 'x-file-name': encodeURIComponent(file.name), 'content-type': file.type || 'application/octet-stream' }, body: file });
       const data = await response.json();
+      if (requestEpoch !== workspaceEpoch) return;
       if (!response.ok) throw new Error(data.error || '上传失败');
       count += 1;
     }
     toast(`已保存 ${count} 项素材`);
-  } catch (err) { toast(`已保存 ${count} 项；${err.message}`); }
-  finally { event.target.value = ''; event.target.disabled = false; await loadAssets(); }
+  } catch (err) { if (requestEpoch === workspaceEpoch) toast(`已保存 ${count} 项；${err.message}`); }
+  finally {
+    if (requestEpoch === workspaceEpoch) {
+      event.target.value = ''; event.target.disabled = false; await loadAssets();
+    }
+  }
 });
 
 if (el.assetSearch) {
@@ -2294,9 +2323,14 @@ if (referenceInput) {
     referenceInput.value = '';
     renderReferencePreviews();
     for (const item of newItems) {
-      item.uploadPromise = uploadVideoReference(item, 0, 1, { silent: true })
-        .then(() => { if (!document.getElementById('pageAssets')?.hidden) loadAssets(); })
-        .catch((err) => { toast(`参考图片保存失败：${err.message}`); });
+    const uploadEpoch = workspaceEpoch;
+    item.uploadPromise = uploadVideoReference(item, 0, 1, { silent: true });
+    item.uploadPromise
+        .then(() => { if (uploadEpoch === workspaceEpoch && !document.getElementById('pageAssets')?.hidden) loadAssets(); })
+        .catch((err) => {
+          item.uploadPromise = null;
+          if (uploadEpoch === workspaceEpoch) toast(`参考图片保存失败：${err.message}`);
+        });
     }
     if (added) toast(`已添加 ${added} 张参考图片，正在保存到资产`);
     if (rejected) toast(`已跳过 ${rejected} 张重复、格式不支持或超过数量限制的图片`);
@@ -2412,7 +2446,8 @@ function renderGenerationPreview(generation) {
       ? generationFailureMessage(generation)
       : status === 'SUCCESS'
         ? (resultUrl ? '生成结果已就绪，可以直接播放与全屏预览。' : '任务已完成，但接口没有返回可播放的视频地址。')
-        : status === 'QUEUED' ? '任务已进入队列，请保持页面打开。' : 'AI 正在构建画面与运动效果，请耐心等待。';
+        : generation.pollingError ? `状态查询暂时失败：${generation.pollingError}`
+          : status === 'QUEUED' ? '任务已进入队列，关闭页面后服务器仍会继续跟踪任务。' : 'AI 正在构建画面与运动效果，请耐心等待。';
   }
   if (generationProgressNote) {
     generationProgressNote.textContent = failed
@@ -2508,6 +2543,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 async function uploadVideoReference(item, index, total, { silent = false } = {}) {
+  const requestEpoch = workspaceEpoch;
   if (item.referenceId) return { id: item.referenceId };
   if (!silent) {
     if (generationStageLabel) generationStageLabel.textContent = '正在上传参考素材';
@@ -2524,6 +2560,7 @@ async function uploadVideoReference(item, index, total, { silent = false } = {})
     body: item.file,
   });
   const data = await response.json().catch(() => ({}));
+  if (requestEpoch !== workspaceEpoch) throw Object.assign(new Error('账号已切换，请重试'), { code: 'STALE_ACCOUNT' });
   if (response.status === 401) showLogin('会话已过期，请重新登录');
   if (!response.ok) throw Object.assign(new Error(data.error || `参考素材上传失败（HTTP ${response.status}）`), { status: response.status, data });
   item.referenceId = data.reference.id;
@@ -2531,6 +2568,7 @@ async function uploadVideoReference(item, index, total, { silent = false } = {})
 }
 
 async function runHomeCommand() {
+  const requestEpoch = workspaceEpoch;
   if (generationBusy) {
     toast('当前视频仍在生成，完成后才能创建下一个任务');
     return;
@@ -2584,9 +2622,12 @@ async function runHomeCommand() {
   if (status) status.textContent = '正在提交生成任务…';
   try {
     const uploadedReferences = [];
-    for (let index = 0; index < referenceFiles.length; index += 1) {
-      if (referenceFiles[index].uploadPromise) await referenceFiles[index].uploadPromise;
-      uploadedReferences.push(await uploadVideoReference(referenceFiles[index], index, referenceFiles.length));
+    const references = [...referenceFiles];
+    for (let index = 0; index < references.length; index += 1) {
+      if (references[index].uploadPromise) await references[index].uploadPromise;
+      if (requestEpoch !== workspaceEpoch) return;
+      uploadedReferences.push(await uploadVideoReference(references[index], index, references.length));
+      if (requestEpoch !== workspaceEpoch) return;
       const uploadProgress = 4 + Math.round(((index + 1) / referenceFiles.length) * 8);
       if (generationProgressBar) generationProgressBar.style.width = `${uploadProgress}%`;
       if (generationProgressPercent) generationProgressPercent.textContent = `${uploadProgress}%`;
@@ -2606,6 +2647,7 @@ async function runHomeCommand() {
     toast('视频任务已提交，正在云端生成');
     monitorGeneration(created);
   } catch (err) {
+    if (requestEpoch !== workspaceEpoch) return;
     if (err.status === 409 && err.data?.generation) {
       monitorGeneration(err.data.generation);
       toast('已有视频正在生成，已恢复当前任务');

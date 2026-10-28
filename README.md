@@ -1,6 +1,10 @@
-# watermarkremover · 全自动视频去水印 / 去字幕
+# ClipFlow AI · 一站式 AI 视频创作平台
 
 给公司内部员工用的 Web 网站：**手机号/密码登录 → 上传视频或粘贴直链 → 选择处理工具 → 在线预览 → 下载结果**。
+
+创作页支持 AutoDL 文生视频、多图生视频、首尾帧生视频，限定 9:16 和 5/10/15 秒；后台每 15 秒查询未完成任务，网页关闭后仍会继续跟踪并保存结果。账号（包括管理员）的创作、工具、资产数据按用户隔离。
+
+本次代码检查、修复及尚未完成的功能见 [代码检查记录](docs/code-audit-2026-10-28.md)。视频生成目前尚未接入网站积分扣费规则；工具任务已有扣费与退款。
 
 Node.js 无第三方包依赖；服务端计费时长校验需要系统安装 `ffprobe`（FFmpeg 提供，可用 `FFPROBE_PATH` 指定可执行文件）。安装后运行 `node server.mjs`。
 
@@ -19,7 +23,7 @@ Node.js 无第三方包依赖；服务端计费时长校验需要系统安装 `f
       ├─ 本地算 MD5（Web Worker 分片，边读边算）
       ├─ 先问服务端「有没有这个 MD5」→ 有就秒传，一个字节都不传
       └─ 没有才真的上传：落盘名 = <md5><ext>，同时算出 sha256
-② 服务端给文件生成唯一 ID（vf_xxx）与公网 URL（/f/vf_xxx，支持 Range，可匿名拉取）
+② 服务端给文件生成唯一 ID（vf_xxx）与签名 URL（支持 Range，签名有效期 6 小时，供云端匿名拉取）
 ③ 提交去字幕任务：POST {去字幕接口}{ video_url, mode:"Subtitle" } → 拿到 task_id
 ④ 前端按 task_id 轮询进度，页面显示阶段 + 百分比
 ⑤ 接口返回产物地址 → 服务端把产物回传到本地
@@ -43,7 +47,7 @@ Node.js 无第三方包依赖；服务端计费时长校验需要系统安装 `f
 两个硬性前提：
 
 1. **`AMK_API_KEY`**：去字幕接口的密钥。
-2. **`PUBLIC_BASE_URL`**：接口在公网侧，必须能**匿名 HEAD/GET** 到 `PUBLIC_BASE_URL/f/<fileId>`。同局域网的内网 IP 对云端不可达，需要反向代理域名或隧道（例如 `cloudflared tunnel --url http://127.0.0.1:8787`）。
+2. **`PUBLIC_BASE_URL`**：接口在公网侧，必须能**匿名 HEAD/GET** 到服务器签发的完整签名 URL（包含 `expires` 和 `signature`）。裸 `/f/<fileId>` 只允许所属账号登录访问。同局域网的内网 IP 对云端不可达，需要反向代理域名或隧道（例如 `cloudflared tunnel --url http://127.0.0.1:8787`）。
 
 缺任何一个，`POST /api/files/:id/process` 会返回 `503` 并列出缺失项，前端直接显示原因。
 
@@ -108,7 +112,7 @@ npm start                 # 等价于 node server.mjs
 | `GET` | `/api/config` | 登录 | 对外基址、上限、处理类型、阶段、TTL、会话策略 |
 | `POST` | `/api/uploads/precheck` | 登录 | 秒传预检 `{ md5, name? }` → `{ exists, file?, savedBytes }` |
 | `POST` | `/api/uploads` | 登录 | 原始字节流上传；`X-File-Name`、`X-File-MD5`（可选）→ `{ file, deduped, md5 }` |
-| `GET&#124;HEAD` | `/f/vf_xxx` | **公开** | 能力 URL：匿名可拉取（去字幕接口就是拉这里），支持 Range |
+| `GET&#124;HEAD` | `/f/vf_xxx` | 所属账号登录或有效签名 | 云端使用完整签名 URL 拉取，支持 Range |
 | `POST` | `/api/files/:fileId/process` | 登录 | 提交去字幕任务 → `202 { task, poll }`；未配好接口 → `503` |
 | `GET` | `/api/tasks/:taskId` | 登录 | **轮询接口**（`status progress stage stageKey`） |
 | `DELETE` | `/api/tasks/:taskId` | 登录 | 取消排队中/处理中的任务 |

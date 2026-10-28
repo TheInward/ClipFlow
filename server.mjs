@@ -2250,20 +2250,21 @@ async function autodlRequest(pathname, { method = 'GET', body } = {}) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    const taskStateMessage = method === 'POST' ? '任务未创建。' : '暂时无法查询任务状态，已提交的任务可能仍在运行。';
     const upstreamMessage = String(data?.error?.message || data?.message || data?.msg || `AutoDL HTTP ${response.status}`);
     let message = upstreamMessage;
     let errorCode = 'PROVIDER_REQUEST_FAILED';
     let retryable = response.status >= 500;
     if (/insufficient account balance/i.test(upstreamMessage)) {
-      message = '云端视频生成服务余额不足，任务未创建。请联系管理员充值服务商账户后重试。';
+      message = `云端视频生成服务余额不足，${taskStateMessage}请联系管理员充值服务商账户后重试。`;
       errorCode = 'PROVIDER_BALANCE_INSUFFICIENT';
       retryable = false;
     } else if (response.status === 401 || /unauthori[sz]ed|invalid.*token|token.*invalid/i.test(upstreamMessage)) {
-      message = '云端视频生成服务鉴权失败，任务未创建。请联系管理员检查接口 Token。';
+      message = `云端视频生成服务鉴权失败，${taskStateMessage}请联系管理员检查接口 Token。`;
       errorCode = 'PROVIDER_AUTH_FAILED';
       retryable = false;
     } else if (response.status === 429 || /rate limit|too many requests/i.test(upstreamMessage)) {
-      message = '云端视频生成服务当前请求过多，任务未创建。请稍后再试。';
+      message = `云端视频生成服务当前请求过多，${taskStateMessage}请稍后再试。`;
       errorCode = 'PROVIDER_RATE_LIMITED';
       retryable = true;
     }
@@ -2332,17 +2333,44 @@ function serializeVideoGeneration(item) {
     error: item.error || null,
     errorCode: item.errorCode || null,
     failureStage: item.failureStage || null,
+    pollingError: item.pollingError || null,
     estimatedProgress,
   };
 }
 
-async function refreshVideoGeneration(item) {
+const videoGenerationRefreshes = new Map();
+function refreshVideoGeneration(item) {
+  if (!item || !item.taskId || VIDEO_GENERATION_TERMINAL.has(item.status)) return Promise.resolve(item);
+  if (videoGenerationRefreshes.has(item.taskId)) return videoGenerationRefreshes.get(item.taskId);
+  const pending = fetchVideoGenerationStatus(item).catch((err) => {
+    item.pollingError = err.message;
+    saveDb();
+    throw err;
+  }).finally(() => videoGenerationRefreshes.delete(item.taskId));
+  videoGenerationRefreshes.set(item.taskId, pending);
+  return pending;
+}
+
+let pollingVideoGenerations = false;
+async function pollVideoGenerations() {
+  if (!AUTODL_READY || pollingVideoGenerations) return;
+  pollingVideoGenerations = true;
+  try {
+    const active = Object.values(db.videoGenerations).filter((item) => VIDEO_GENERATION_ACTIVE.has(item.status));
+    for (let index = 0; index < active.length; index += 2) {
+      await Promise.allSettled(active.slice(index, index + 2).map(refreshVideoGeneration));
+    }
+  } finally { pollingVideoGenerations = false; }
+}
+
+async function fetchVideoGenerationStatus(item) {
   if (!item || !item.taskId || VIDEO_GENERATION_TERMINAL.has(item.status)) return item;
   const upstream = await autodlRequest(`/comfyui_workflow/result/${encodeURIComponent(item.taskId)}`);
   if (upstream?.code !== 'Success' || !upstream?.data) {
     throw Object.assign(new Error(upstream?.msg || '查询生成任务失败'), { status: 502 });
   }
   const data = upstream.data;
+  if (item.pollingError) { delete item.pollingError; saveDb(); }
   const before = JSON.stringify([item.status, item.duration, item.startedAt, item.results]);
   item.status = normalizeVideoGenerationStatus(data.status || item.status);
   item.duration = data.duration ?? item.duration ?? null;
@@ -2623,6 +2651,8 @@ const ROUTES = {
     if (workflow !== expectedWorkflow) return sendError(res, 400, '生成方式与视频工作流不匹配');
     const parameters = body.parameters && typeof body.parameters === 'object' && !Array.isArray(body.parameters)
       ? { ...body.parameters } : {};
+    parameters.resolution ??= '768p竖';
+    parameters.duration ??= 5;
     for (const key of Object.keys(parameters)) {
       if (/^ref_(?:image|audio|video)_\d+$/.test(key) || key === 'first_frame' || key === 'last_frame') delete parameters[key];
     }
@@ -2641,6 +2671,7 @@ const ROUTES = {
       if (!AUTODL_VIDEO_DURATIONS.has(duration)) {
         return sendError(res, 400, '当前视频生成仅支持 5 秒、10 秒或 15 秒', { allowed: [...AUTODL_VIDEO_DURATIONS] });
       }
+      parameters.duration = duration;
     }
     if (videoGenerationSubmissionLocks.has(user.id)) {
       return sendError(res, 409, '当前视频正在提交，请勿重复点击');
@@ -2708,6 +2739,11 @@ const ROUTES = {
       db.videoGenerationCurrent[user.id] = latest && !latest.dismissedAt ? latest.taskId : null; saveDb();
     }
     let generation = videoGenerationForUser(user.id, true) || db.videoGenerations[db.videoGenerationCurrent[user.id]] || null;
+    if (generation && generation.userId !== user.id) {
+      generation = null;
+      db.videoGenerationCurrent[user.id] = null;
+      saveDb();
+    }
     if (generation?.dismissedAt) generation = null;
     if (generation && VIDEO_GENERATION_ACTIVE.has(generation.status)) {
       try { await refreshVideoGeneration(generation); } catch { /* 前端继续轮询原状态 */ }
@@ -2981,6 +3017,7 @@ const ROUTES = {
 
   /* ---------------- 维护：手动触发过期清理（便于联调） ---------------- */
   'POST /api/maintenance/sweep': async (req, res) => {
+    if (currentUser(req)?.role !== 'admin') return sendError(res, 403, '需要管理员权限');
     const result = await sweepExpired('manual');
     sendJson(res, 200, { swept: result, ttlHours: UPLOAD_TTL_MS / 3600000 });
   },
@@ -3865,6 +3902,7 @@ server.listen(PORT, HOST, async () => {
   for (const generation of Object.values(db.videoGenerations)) registerGenerationAssets(generation);
   for (const userId of new Set([...Object.values(db.files), ...Object.values(db.tasks)].map((item) => item.userId).filter(Boolean))) syncUserAssets(userId);
   saveDb();
+  pollVideoGenerations().catch((err) => console.error('[video-generation] 后台查询失败:', err.message));
   // 先接管/清理上次运行遗留的「处理中」任务，再开始服务
   recoverInterruptedTasks();
   const swept = await sweepExpired('startup').catch((err) => {
@@ -3892,6 +3930,10 @@ server.listen(PORT, HOST, async () => {
 });
 
 // 定时清理过期文件（同时兜住跨天的会话失效）
+setInterval(() => {
+  pollVideoGenerations().catch((err) => console.error('[video-generation] 后台查询失败:', err.message));
+}, 15000).unref?.();
+
 setInterval(() => {
   sweepExpired('timer').catch((err) => console.error('[ttl] 定时清理失败:', err.message));
   pruneSessions();

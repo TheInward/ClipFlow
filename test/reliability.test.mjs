@@ -37,6 +37,12 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
   let serial = 0;
   const upstream = http.createServer(async (req, res) => {
     const json = (body) => { res.setHeader('Content-Type','application/json'); res.end(JSON.stringify(body)); };
+    if (req.method === 'GET' && req.url === '/comfy/comfyui_workflow/result/video_background') {
+      return json({code:'Success',data:{status:'SUCCESS',results:[]}});
+    }
+    if (req.method === 'GET' && req.url === '/comfy/comfyui_workflow/result/video_poll_error') {
+      res.statusCode=401; return json({message:'invalid token'});
+    }
     if (req.url.startsWith('/asset')) { res.setHeader('Content-Length','2048'); res.end(req.method === 'HEAD' ? undefined : Buffer.alloc(2048)); return; }
     if (req.method === 'POST' && req.url.startsWith('/comfy/comfyui_workflow/')) {
       let raw = ''; for await (const chunk of req) raw += chunk;
@@ -71,13 +77,16 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
   const seed = { users: {}, sessions: {} };
-  for (const id of ['a','b','poor','admin']) {
+  for (const id of ['a','b','poor','admin','background','isolated','poll_error']) {
     seed.users[id] = { id, status:'active', role: id === 'admin' ? 'admin' : 'user', credits: id === 'poor' ? 0 : 100 };
     seed.sessions[id] = { userId:id, createdAt:new Date().toISOString(), expiresAt:Date.now()+30*60*1000 };
   }
   await fs.mkdir(path.join(dir, 'assets'), { recursive: true });
   await fs.writeFile(path.join(dir, 'assets', 'saved-video.mp4'), Buffer.alloc(2048, 7));
-  seed.videoGenerations = { video_finished: { taskId:'video_finished', userId:'a', status:'SUCCESS',
+  seed.videoGenerationCurrent = {isolated:'video_finished'};
+  seed.videoGenerations = { video_background: {taskId:'video_background',userId:'background',status:'RUNNING',results:[],createdAt:new Date().toISOString()},
+    video_poll_error: {taskId:'video_poll_error',userId:'poll_error',status:'RUNNING',results:[],createdAt:new Date().toISOString()},
+    video_finished: { taskId:'video_finished', userId:'a', status:'SUCCESS',
     prompt:'保留在资产中的提示词', results:[], createdAt:new Date().toISOString() },
     older_success: { taskId:'older_success', userId:'poor', status:'SUCCESS', prompt:'older', results:[],
       createdAt:'2020-01-01T00:00:00Z', updatedAt:'2099-01-01T00:00:00Z' },
@@ -130,6 +139,16 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
   const cancel = async(id, user='a')=>api(`/api/tasks/${id}`,{method:'DELETE',user});
   const task = async(id,user='a')=>(await api(`/api/tasks/${id}`,{user})).data.task;
 
+  await t.test('background polling completes persisted generations without a browser and rejects foreign current pointers',async()=>{
+    await until(async()=>JSON.parse(await fs.readFile(path.join(dir,'db.json'),'utf8')).videoGenerations.video_background.status==='SUCCESS');
+    assert.equal((await api('/api/video-generations/current',{user:'isolated'})).data.generation,null);
+    assert.equal((await api('/api/maintenance/sweep',{method:'POST'})).status,403);
+    const polling = (await api('/api/video-generations/current',{user:'poll_error'})).data.generation;
+    assert.equal(polling.status,'RUNNING');
+    assert.match(polling.pollingError,/暂时无法查询任务状态/);
+    assert.doesNotMatch(polling.pollingError,/任务未创建/);
+  });
+
   await t.test('malformed cookies and path escapes do not terminate the server; session cookie renews',async()=>{
     const bad=await api('/api/me',{headers:{Cookie:'clp_sid=%'}});assert.equal(bad.status,401);
     assert.equal((await api('/api/tasks/%')).status,400);
@@ -152,7 +171,7 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     }});
     assert.equal(invalidDuration.status,400); assert.match(invalidDuration.data.error,/5 秒、10 秒或 15 秒/);
     const text = await api('/api/video-generations',{user:'admin',method:'POST',body:{
-      mode:'text', workflow:'minimax_h3_lightx2v_no_pic', prompt:'text prompt', parameters:{duration:5,resolution:'768p竖'}, referenceIds:[],
+      mode:'text', workflow:'minimax_h3_lightx2v_no_pic', prompt:'text prompt', referenceIds:[],
     }});
     assert.equal(text.status,202,JSON.stringify(text.data));
     const adminVideoId = text.data.taskId;
@@ -171,6 +190,8 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     }});
     assert.equal(frames.status,202,JSON.stringify(frames.data));
     assert.equal(videoWorkflowCalls[0].workflow,'minimax_h3_lightx2v_no_pic');
+    assert.equal(videoWorkflowCalls[0].input.duration,5);
+    assert.equal(videoWorkflowCalls[0].input.resolution,'768p竖');
     assert.equal(videoWorkflowCalls[0].input.ref_image_0,undefined);
     assert.equal(videoWorkflowCalls[1].workflow,'minimax_h3_lightx2v_v5_15s');
     assert.match(videoWorkflowCalls[1].input.ref_image_0,/\/r\/ref_/);
@@ -491,4 +512,63 @@ test('a late generation poll cannot replace the current preview', async () => {
   resolvePoll({taskId:'older-task',status:'SUCCESS'});
   await pending;
   assert.deepEqual(rendered,['older-task']);
+});
+
+test('a reference upload from an old account cannot mutate the new workspace', async () => {
+  const source = await fs.readFile('public/app.js','utf8');
+  const start = source.indexOf('async function uploadVideoReference(');
+  const end = source.indexOf('async function runHomeCommand()',start);
+  let finish;
+  const context = vm.createContext({workspaceEpoch:1,
+    fetch:()=>new Promise(resolve=>{finish=resolve;}), showLogin:()=>{throw new Error('old response must not log out new user');},
+  });
+  vm.runInContext(source.slice(start,end),context);
+  const item = {file:{name:'reference.jpg',type:'image/jpeg'}};
+  const pending = context.uploadVideoReference(item,0,1,{silent:true});
+  context.workspaceEpoch = 2;
+  finish({status:201,ok:true,json:async()=>({reference:{id:'foreign_reference'}})});
+  await assert.rejects(pending,{code:'STALE_ACCOUNT'});
+  assert.equal(item.referenceId,undefined);
+});
+
+test('account reset clears recent assets and invalidates the cached task rendering',async()=>{
+  const source = await fs.readFile('public/app.js','utf8');
+  const start = source.indexOf('function resetWorkspace()');
+  const end = source.indexOf("window.addEventListener('storage'",start);
+  const cleared = [];
+  let aborted = false;
+  const upload = {xhr:{abort(){aborted=true;}}};
+  const context = vm.createContext({workspaceEpoch:1,workspaceUserId:'a',lastSig:'old-task-signature',
+    state:{items:[upload],downloading:new Set(),selected:new Set()},assetRefreshTimer:null,taskPollTimer:null,
+    generationMonitorToken:0,generationBusy:false,el:{},homeCmd:{value:'private prompt'},referenceInput:{value:''},
+    document:{getElementById:()=>null,querySelector:(selector)=>({querySelectorAll:()=>[],replaceChildren:()=>cleared.push(selector)})},
+    clearTimeout(){},clearInterval(){},stopPolling(){},clearReferenceFiles(){},clearGenerationPreview(){},
+  });
+  vm.runInContext(source.slice(start,end),context);
+  context.resetWorkspace();
+  assert.ok(cleared.includes('#homeAssets')); assert.ok(cleared.includes('#toolsRecent'));
+  assert.equal(context.lastSig,''); assert.equal(context.homeCmd.value,'');
+  assert.equal(context.workspaceUserId,null); assert.equal(context.workspaceEpoch,2);
+  assert.equal(upload.canceled,true); assert.equal(aborted,true);
+});
+
+test('the comparison divider moves correctly from either endpoint using the keyboard',async()=>{
+  const source = await fs.readFile('public/app.js','utf8');
+  const start = source.indexOf('function bindVideoCompare(');
+  const end = source.indexOf('\nfunction renderSummary(',start);
+  const handlers = new Map();
+  const node = () => ({addEventListener(){},setAttribute(){},style:{},textContent:''});
+  const stage = {dataset:{},style:{setProperty(){}},getBoundingClientRect:()=>({left:0,width:100})};
+  const divider = {...node(),addEventListener:(name,fn)=>handlers.set(name,fn)};
+  const nodes = {'.video-compare':stage,'.compare-divider':divider,
+    '.compare-source':node(),'.compare-result':node(),'.compare-play':node(),'.compare-seek':node(),
+    '.compare-time':node(),'.compare-duration':node()};
+  const context = vm.createContext({});
+  vm.runInContext(source.slice(start,end),context);
+  context.bindVideoCompare({querySelector:(selector)=>nodes[selector]});
+  const key = (value)=>handlers.get('keydown')({key:value,preventDefault(){}});
+  key('Home'); assert.equal(stage.dataset.split,'0');
+  key('ArrowRight'); assert.equal(stage.dataset.split,'2');
+  key('End'); assert.equal(stage.dataset.split,'100');
+  key('ArrowLeft'); assert.equal(stage.dataset.split,'98');
 });

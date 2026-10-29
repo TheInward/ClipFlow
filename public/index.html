@@ -84,6 +84,16 @@
           <p>从文字与参考素材生成视频，并在一个工作台完成字幕、画质与发布前处理。</p>
         </div>
 
+        <nav class="creation-workspace-tabs" aria-label="创作类型">
+          <button type="button" class="creation-workspace-tab is-active" data-creation-workspace="generate">视频生成</button>
+          <button type="button" class="creation-workspace-tab" data-creation-workspace="recreation">视频复刻</button>
+        </nav>
+        <div class="creation-workspace" id="creationWorkspace">
+        <aside class="recreation-showcase" id="recreationShowcase" aria-label="视频复刻说明" hidden>
+          <div class="recreation-showcase-art"><span>保留原视频动作与镜头</span></div>
+          <h2>把喜欢的视频，复刻成你的作品。</h2>
+          <p>上传参考视频和替换素材，描述你想改变的内容。</p>
+        </aside>
         <section class="creation-composer" aria-label="视频生成工作台">
           <div class="reference-previews" id="referencePreviews" aria-label="已添加的参考素材" hidden>
             <div class="reference-preview-list" id="referencePreviewList"></div>
@@ -101,7 +111,7 @@
             </label>
 
             <label class="composer-select model-select"><span class="select-icon" aria-hidden="true">◉</span><select id="videoWorkflow" aria-label="视频模型"><option value="minimax_h3_lightx2v_no_pic">MiniMax H3</option></select></label>
-            <label class="composer-select"><span class="select-icon" aria-hidden="true">▧</span><select id="generationMode" aria-label="创作方式"><option value="text">文生视频</option><option value="multi_image">多图生视频</option><option value="keyframes">首尾帧生视频</option><option value="recreation">视频复刻</option></select></label>
+            <label class="composer-select"><span class="select-icon" aria-hidden="true">▧</span><select id="generationMode" aria-label="创作方式"><option value="text">文生视频</option><option value="multi_image">多图生视频</option><option value="keyframes">首尾帧生视频</option></select></label>
             <label class="composer-select" id="recreationTargetControl" hidden><select id="recreationTarget" aria-label="替换内容"><option value="subject">替换主体</option><option value="background">替换背景</option></select></label>
 
             <div class="composer-specs">
@@ -148,6 +158,7 @@
             <div class="generation-batch-results" id="generationBatchResults" aria-label="本批次视频版本" hidden></div>
           </div>
         </section>
+        </div><!-- /creationWorkspace -->
 
         <section class="inspiration-section" aria-labelledby="inspirationTitle">
           <div class="inspiration-head">

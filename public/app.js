@@ -2306,9 +2306,24 @@ function referenceKind(file) {
   return null;
 }
 
+let recreationWorkspace = false;
 function currentGenerationMode() {
-  return generationModeSelect?.value || 'text';
+  return recreationWorkspace ? 'recreation' : (generationModeSelect?.value || 'text');
 }
+
+document.querySelectorAll('[data-creation-workspace]').forEach(button=>button.addEventListener('click',()=>{
+  const next=button.dataset.creationWorkspace==='recreation';
+  if (next===recreationWorkspace) return;
+  if (generationBusy) { toast('当前任务完成后再切换创作方式'); return; }
+  clearReferenceFiles();recreationWorkspace=next;
+  document.querySelectorAll('[data-creation-workspace]').forEach(tab=>tab.classList.toggle('is-active',tab===button));
+  document.getElementById('creationWorkspace')?.classList.toggle('is-recreation',next);
+  const modeControl=generationModeSelect?.closest('.composer-select');if(modeControl)modeControl.hidden=next;
+  const target=document.getElementById('recreationTargetControl');if(target)target.hidden=!next;
+  const help=document.getElementById('recreationHelp');if(help)help.hidden=!next;
+  const batchHint=document.getElementById('generationBatchHint');if(batchHint&&next){batchHint.hidden=false;batchHint.textContent='上传参考视频与替换图片，保留原视频动作进行复刻。';}else if(batchHint)batchHint.hidden=true;
+  syncGenerationMode();
+}));
 
 function clearReferenceFiles() {
   for (const item of referenceFiles) URL.revokeObjectURL(item.url);
@@ -2321,6 +2336,8 @@ function syncGenerationMode({ clear = false } = {}) {
   const mode = currentGenerationMode();
   const textOnly = mode === 'text';
   const recreation = mode === 'recreation';
+  document.getElementById('creationWorkspace')?.classList.toggle('is-recreation',recreation);
+  const showcase=document.getElementById('recreationShowcase');if(showcase)showcase.hidden=!recreation||!generationPreview?.hidden;
   for (const [id, allowed, fallback] of [['videoDuration',['5','10','15'],'5'],['videoResolution',['768p'],'768p']]) {
     const select=document.getElementById(id);
     if (!select) continue;
@@ -2562,6 +2579,7 @@ function renderGenerationPreview(generation) {
   const duration = generation.parameters?.duration ? `${generation.parameters.duration} 秒` : '';
 
   generationPreview.hidden = false;
+  const showcase=document.getElementById('recreationShowcase');if(showcase)showcase.hidden=true;
   generationPreview.classList.toggle('is-complete', status === 'SUCCESS');
   generationPreview.classList.toggle('is-failed', failed);
   if (generationProgressBar) generationProgressBar.style.width = `${progress}%`;

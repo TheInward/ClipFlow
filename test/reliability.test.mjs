@@ -12,6 +12,8 @@ import { enhanceVideo, runTranscode, runToolVideo, runAsr, runOcr } from '../pip
 import { probeVideoDuration } from '../media.mjs';
 import { createGenerationVariants } from '../video-variants.mjs';
 
+const EXPECTED_GENERATION_CONSTRAINTS = '产品外形不变，轮廓、花纹、产品材质、外形保持和参考图完全一致；画面无闪烁、光线没有过度曝光、无物体形变、无水印、无内嵌文字字幕、无多余杂物；手部正常，无多指、融指畸形；镜头不剧烈抖动，不要卡通、手绘、CG塑料质感，真实的实拍质感、生活感觉，不要有AI味， 光线明亮、光影有层次感，';
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function until(fn, timeout = 10000) {
   const end = Date.now() + timeout;
@@ -44,7 +46,9 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     if (req.method === 'POST' && req.url === '/h3/v2/video_generation') {
       assert.equal(req.headers.authorization,'Bearer test-token');
       let raw=''; for await (const chunk of req) raw+=chunk;
-      const input=JSON.parse(raw); const taskId='h3_video_'+(++h3Serial);
+      const input=JSON.parse(raw);
+      assert.ok(input.content.find(item=>item.type==='text').text.endsWith(EXPECTED_GENERATION_CONSTRAINTS));
+      const taskId='h3_video_'+(++h3Serial);
       generationJobs.set(taskId,{status:'queued',input});
       return json({task_id:taskId});
     }
@@ -67,6 +71,7 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
       let raw = ''; for await (const chunk of req) raw += chunk;
       const workflow = decodeURIComponent(req.url.slice('/comfy/comfyui_workflow/'.length));
       const input = JSON.parse(raw);
+      assert.ok(input.prompt.endsWith(EXPECTED_GENERATION_CONSTRAINTS));
       videoSubmissionAttempts.push(input);
       if (input.prompt.startsWith('force submission failure')) {
         res.statusCode = 402;
@@ -218,6 +223,8 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     const text = await api('/api/video-generations',{user:'admin',method:'POST',body:{
       mode:'text', workflow:'minimax_h3_lightx2v_no_pic', prompt:'text prompt', referenceIds:[],
     }});
+    assert.equal(text.data.prompt,'text prompt');
+    assert.equal(JSON.stringify(text.data).includes(EXPECTED_GENERATION_CONSTRAINTS),false);
     assert.equal(text.status,202,JSON.stringify(text.data));
     const adminVideoId = text.data.taskId;
     assert.equal((await api(`/api/video-generations/${adminVideoId}`,{user:'a',method:'DELETE'})).status,404);
@@ -347,6 +354,8 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     assert.equal((await post([video.data.reference.id,image.id],'invalid')).status,400);
     const result=await post([video.data.reference.id,image.id],'background');
     assert.equal(result.status,202,JSON.stringify(result.data));
+    assert.equal(result.data.prompt,'保留动作，替换主体');
+    assert.equal(JSON.stringify(result.data).includes(EXPECTED_GENERATION_CONSTRAINTS),false);
     const job=generationJobs.get(result.data.taskId);
     assert.equal(job.input.model,'MiniMax-H3'); assert.equal(job.input.resolution,'768P');
     assert.equal(job.input.ratio,'9:16'); assert.equal(job.input.duration,5);
@@ -602,6 +611,15 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     const downloaded = await api(`/api/download/${tid}`);
     assert.equal(downloaded.status, 200);
     assert.match(downloaded.headers.get('content-type'), /video\/mp4/);
+  });
+  await t.test('provider constraints never enter prompt assets or task records',async()=>{
+    const assets=(await api('/api/assets',{user:'admin'})).data;
+    assert.equal(JSON.stringify(assets).includes(EXPECTED_GENERATION_CONSTRAINTS),false);
+    const records=await api('/api/video-generations/current',{user:'recreation'});
+    assert.equal(JSON.stringify(records.data).includes(EXPECTED_GENERATION_CONSTRAINTS),false);
+    await until(async()=>{const saved=JSON.parse(await fs.readFile(path.join(dir,'db.json'),'utf8'));return Object.values(saved.videoGenerations||{}).length>0;});
+    const saved=await fs.readFile(path.join(dir,'db.json'),'utf8');
+    assert.equal(saved.includes(EXPECTED_GENERATION_CONSTRAINTS),false);
   });
   await t.test('watermark click starts only the newly appended task and retains insufficient-credit entries',async()=>{
     const first=await api('/api/batches/from-urls',{method:'POST',body:{content:'https://8.8.8.8/queued.mp4'}});

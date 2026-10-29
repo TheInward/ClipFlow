@@ -2257,7 +2257,16 @@ function createUrlTask(urlInfo, user, eff) {
  * AutoDL ComfyUI 服务端代理。
  * Token 只存在于 Node 进程环境变量中，绝不下发给浏览器或写入任务数据。
  */
+const VIDEO_GENERATION_CONSTRAINTS = '产品外形不变，轮廓、花纹、产品材质、外形保持和参考图完全一致；画面无闪烁、光线没有过度曝光、无物体形变、无水印、无内嵌文字字幕、无多余杂物；手部正常，无多指、融指畸形；镜头不剧烈抖动，不要卡通、手绘、CG塑料质感，真实的实拍质感、生活感觉，不要有AI味， 光线明亮、光影有层次感，';
+
 async function autodlRequest(pathname, { method = 'GET', body, h3 = false } = {}) {
+  // 仅构造接口请求时追加；不修改任务、提示词资产或浏览器中的原始内容。
+  if (method === 'POST' && body) {
+    const append = text => `${text}\n\n${VIDEO_GENERATION_CONSTRAINTS}`;
+    body = h3
+      ? {...body, content:body.content.map(item=>item.type === 'text' ? {...item,text:append(item.text)} : item)}
+      : {...body,prompt:append(body.prompt)};
+  }
   if (!(h3 ? AUTODL_H3_API_TOKEN : AUTODL_READY)) throw Object.assign(new Error('视频生成服务尚未配置'), { status: 503 });
   const response = await fetch(`${h3 ? AUTODL_H3_API_BASE : AUTODL_API_BASE}${pathname}`, {
     method,

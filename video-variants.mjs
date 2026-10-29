@@ -25,8 +25,10 @@ export function createGenerationVariants({ prompt, parameters, count, mode }) {
     const constraints = mode === 'keyframes'
       ? '首帧与尾帧图片是固定约束，不改变其主体、场景及起止构图；变化仅用于两帧之间允许变化的部分。'
       : '保留参考素材中的主体身份、产品外观、标识与核心动作，不新增或替换核心主体。';
-    const variation = `版本 ${index + 1}：${title}。灯光：${lighting}。镜头：${camera}。环境：在符合原提示词指定地点的前提下，表现${background}。${constraints}用户明确指定的地点、背景、动作、色彩及镜头要求优先；仅在未限定的细节上实现本版本差异。`;
-    return {index, title, lighting, camera, background, status:'PENDING', taskId:null,
+    const variation = mode === 'recreation'
+      ? `版本 ${index+1}：${title}。仅在用户允许的替换区域调整${lighting}和材质细节；严格保留原视频的动作、节奏、镜头运动、构图和未替换区域。不得因版本变化改变原动作或镜头。`
+      : `版本 ${index + 1}：${title}。灯光：${lighting}。镜头：${camera}。环境：在符合原提示词指定地点的前提下，表现${background}。${constraints}用户明确指定的地点、背景、动作、色彩及镜头要求优先；仅在未限定的细节上实现本版本差异。`;
+    return {index, title, lighting, camera:mode === 'recreation' ? '沿用参考视频镜头' : camera, background, status:'PENDING', taskId:null,
       prompt: count === 1 ? prompt : `${prompt}\n\n【本条独立创作方向】${variation}`,
       parameters: {...parameters, seed}, error:null};
   });

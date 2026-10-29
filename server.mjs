@@ -26,6 +26,7 @@ import { enhanceVideo, runAsr, toSrt, runTranscode, runOcr, runToolVideo } from 
 import { ZipStream, streamRemote } from './zip.mjs';
 import { probeVideoDuration, probeAvailable, probeVideoSize } from './media.mjs';
 import { assertRecreationVideo, validateRecreationReferences } from './recreation.mjs';
+import { buildRecreationPayload, normalizeH3Response } from './minimax-h3.mjs';
 import { createGenerationVariants, GENERATION_COUNTS } from './video-variants.mjs';
 import { normalizePhone, findUserByPhone, createUser, checkPassword, publicUser, createUserSession, chargeSeconds, refundSeconds, createCodes, redeemCode, ensureAdmin, setPassword, touchSession, SESSION_TTL_MS } from './accounts.mjs';
 import { take as takeToken, stats as rateStats } from './ratelimit.mjs';
@@ -92,6 +93,8 @@ const REFERENCE_MAX_UPLOAD_BYTES = Number(process.env.REFERENCE_MAX_UPLOAD_BYTES
 const PUBLIC_BASE = (process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
 const AUTODL_API_BASE = String(process.env.AUTODL_API_BASE || 'https://autodl.art/api/v1/comfyui').replace(/\/+$/, '');
 const AUTODL_API_TOKEN = String(process.env.AUTODL_API_TOKEN || '').trim();
+const AUTODL_H3_API_BASE = (process.env.AUTODL_H3_API_BASE || 'https://www.autodl.art/api/v1/minimax').replace(/\/$/, '');
+const AUTODL_H3_API_TOKEN = String(process.env.AUTODL_H3_API_TOKEN || AUTODL_API_TOKEN).trim();
 const AUTODL_VIDEO_WORKFLOW = String(process.env.AUTODL_VIDEO_WORKFLOW || 'minimax_h3_lightx2v_no_pic').trim();
 const AUTODL_IMAGE_VIDEO_WORKFLOW = String(process.env.AUTODL_IMAGE_VIDEO_WORKFLOW || 'minimax_h3_lightx2v_v5_15s').trim();
 const AUTODL_KEYFRAME_VIDEO_WORKFLOW = String(process.env.AUTODL_KEYFRAME_VIDEO_WORKFLOW || 'minimax_h3_lightx2v').trim();
@@ -99,7 +102,7 @@ const AUTODL_READY = Boolean(AUTODL_API_TOKEN && AUTODL_VIDEO_WORKFLOW && AUTODL
 const AUTODL_VIDEO_RESOLUTIONS = new Set([
   '480p竖', '768p竖',
 ]);
-const AUTODL_VIDEO_DURATIONS = new Set([3, 5, 10, 15]);
+const AUTODL_VIDEO_DURATIONS = new Set([5, 10, 15]);
 const VIDEO_GENERATION_MODES = new Set(['text', 'multi_image', 'keyframes', 'recreation']);
 const REFERENCE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.mp4', '.mov', '.m4v', '.webm', '.mp3', '.wav', '.m4a', '.flac']);
 const IMAGE_REFERENCE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp']);
@@ -2254,13 +2257,13 @@ function createUrlTask(urlInfo, user, eff) {
  * AutoDL ComfyUI 服务端代理。
  * Token 只存在于 Node 进程环境变量中，绝不下发给浏览器或写入任务数据。
  */
-async function autodlRequest(pathname, { method = 'GET', body } = {}) {
-  if (!AUTODL_READY) throw Object.assign(new Error('视频生成服务尚未配置'), { status: 503 });
-  const response = await fetch(`${AUTODL_API_BASE}${pathname}`, {
+async function autodlRequest(pathname, { method = 'GET', body, h3 = false } = {}) {
+  if (!(h3 ? AUTODL_H3_API_TOKEN : AUTODL_READY)) throw Object.assign(new Error('视频生成服务尚未配置'), { status: 503 });
+  const response = await fetch(`${h3 ? AUTODL_H3_API_BASE : AUTODL_API_BASE}${pathname}`, {
     method,
     signal: AbortSignal.timeout(30_000),
     headers: {
-      Authorization: AUTODL_API_TOKEN,
+      Authorization: h3 ? `Bearer ${AUTODL_H3_API_TOKEN.replace(/^Bearer\s+/i, '')}` : AUTODL_API_TOKEN,
       'Content-Type': 'application/json',
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -2272,7 +2275,7 @@ async function autodlRequest(pathname, { method = 'GET', body } = {}) {
     let message = upstreamMessage;
     let errorCode = 'PROVIDER_REQUEST_FAILED';
     let retryable = response.status >= 500;
-    if (/insufficient account balance/i.test(upstreamMessage)) {
+    if (/insufficient(?: account)? balance|insufficient_balance/i.test(upstreamMessage)) {
       message = `云端视频生成服务余额不足，${taskStateMessage}请联系管理员充值服务商账户后重试。`;
       errorCode = 'PROVIDER_BALANCE_INSUFFICIENT';
       retryable = false;
@@ -2292,7 +2295,12 @@ async function autodlRequest(pathname, { method = 'GET', body } = {}) {
       retryable,
     });
   }
-  return data;
+  return h3 ? normalizeH3Response(data, method) : data;
+}
+
+async function submitRecreation(prompt, parameters, references) {
+  return autodlRequest('/v2/video_generation', {method:'POST', h3:true,
+    body:buildRecreationPayload({prompt, parameters, references, referenceUrl:publicReferenceUrl})});
 }
 
 function safeWorkflowId(input) {
@@ -2383,7 +2391,9 @@ async function pollVideoGenerations() {
 
 async function fetchVideoGenerationStatus(item) {
   if (!item || !item.taskId || VIDEO_GENERATION_TERMINAL.has(item.status)) return item;
-  const upstream = await autodlRequest(`/comfyui_workflow/result/${encodeURIComponent(item.taskId)}`);
+  const upstream = await autodlRequest(item.mode === 'recreation'
+    ? `/v2/query/video_generation/${encodeURIComponent(item.taskId)}`
+    : `/comfyui_workflow/result/${encodeURIComponent(item.taskId)}`, {h3:item.mode === 'recreation'});
   if (upstream?.code !== 'Success' || !upstream?.data) {
     throw Object.assign(new Error(upstream?.msg || '查询生成任务失败'), { status: 502 });
   }
@@ -2510,7 +2520,9 @@ async function advanceVideoBatch(batch) {
         parameters.first_frame=publicReferenceUrl(references[0].id); parameters.last_frame=publicReferenceUrl(references[1].id);
       }
       await persistVideoCheckpoint();
-      upstream = await autodlRequest(`/comfyui_workflow/${encodeURIComponent(batch.workflow)}`, {method:'POST',body:{...parameters,prompt:variant.prompt}});
+      upstream = batch.mode === 'recreation'
+        ? await submitRecreation(variant.prompt, parameters, references)
+        : await autodlRequest(`/comfyui_workflow/${encodeURIComponent(batch.workflow)}`, {method:'POST',body:{...parameters,prompt:variant.prompt}});
       if (upstream?.code !== 'Success' || !upstream?.data?.task_id) throw new Error(upstream?.msg || 'AutoDL 未返回任务 ID');
       if (db.videoGenerations[upstream.data.task_id]) throw new Error('服务商返回了已存在的任务号，已停止后续提交');
     } catch (err) {
@@ -2766,10 +2778,12 @@ const ROUTES = {
       eraseReady: eraseApi.ready,
       eraseMissing: eraseApi.missing.map((m) => (m === 'AMK_API_KEY' ? '去字幕接口密钥' : '公网访问入口')),
       videoGeneration: {
+        durations:[...AUTODL_VIDEO_DURATIONS],
         counts:[...GENERATION_COUNTS],
         recreation: {
-          ready: false, maxVideoSeconds: 15, maxVideos: 1, maxImages: 9,
-          reason: '当前已接入的 MiniMax H3 工作流仅接受图片。保留原动作的视频复刻需要支持视频输入的 H3 工作流，尚待接入。',
+          ready: !!AUTODL_H3_API_TOKEN, minVideoSeconds:2, maxVideoSeconds: 15, maxVideos: 1, maxImages: 9,
+          durations:[5,10,15], resolutions:['768p竖'],
+          reason: AUTODL_H3_API_TOKEN ? '' : '视频复刻服务尚未配置',
         },
         ready: AUTODL_READY,
         provider: 'AutoDL ComfyUI',
@@ -2780,6 +2794,7 @@ const ROUTES = {
           text: AUTODL_VIDEO_WORKFLOW,
           multi_image: AUTODL_IMAGE_VIDEO_WORKFLOW,
           keyframes: AUTODL_KEYFRAME_VIDEO_WORKFLOW,
+          recreation:'MiniMax-H3',
         },
         referenceUpload: '/api/video-references',
         referenceTtlHours: UPLOAD_TTL_MS / 3600000,
@@ -2822,9 +2837,9 @@ const ROUTES = {
     }
     if (mode === 'recreation') {
       await validateRecreationReferences(references, {dataDir: DATA_DIR, replacementTarget: body.replacementTarget});
-      return sendError(res, 503, '当前 MiniMax H3 视频参考工作流尚未接入，暂不能提交保留原动作的视频复刻任务', {errorCode:'RECREATION_WORKFLOW_NOT_CONFIGURED'});
+      if (!AUTODL_H3_API_TOKEN) return sendError(res,503,'视频复刻服务尚未配置');
     }
-    if (references.some((reference) => reference.kind !== 'image' || !IMAGE_REFERENCE_EXT.has(reference.ext))) {
+    if (mode !== 'recreation' && references.some((reference) => reference.kind !== 'image' || !IMAGE_REFERENCE_EXT.has(reference.ext))) {
       return sendError(res, 415, '视频生成参考文件仅支持 JPG、PNG、WebP 图片');
     }
     if (mode === 'text' && references.length) return sendError(res, 400, '文生视频不接受参考图片');
@@ -2834,15 +2849,20 @@ const ROUTES = {
     if (mode === 'keyframes' && references.length !== 2) {
       return sendError(res, 400, '首尾帧生视频需要正好 2 张图片：第一张为首帧，第二张为尾帧');
     }
-    const expectedWorkflow = mode === 'text'
+    const expectedWorkflow = mode === 'recreation' ? 'MiniMax-H3' : mode === 'text'
       ? AUTODL_VIDEO_WORKFLOW
       : mode === 'multi_image' ? AUTODL_IMAGE_VIDEO_WORKFLOW : AUTODL_KEYFRAME_VIDEO_WORKFLOW;
-    const workflow = safeWorkflowId(body.workflow || expectedWorkflow);
+    const workflow = mode === 'recreation' ? String(body.workflow || expectedWorkflow) : safeWorkflowId(body.workflow || expectedWorkflow);
     if (workflow !== expectedWorkflow) return sendError(res, 400, '生成方式与视频工作流不匹配');
     const parameters = body.parameters && typeof body.parameters === 'object' && !Array.isArray(body.parameters)
       ? { ...body.parameters } : {};
     parameters.resolution ??= '768p竖';
     parameters.duration ??= 5;
+    if (mode === 'recreation') {
+      parameters.replacementTarget = body.replacementTarget;
+      if (parameters.resolution !== '768p竖' || ![5,10,15].includes(Number(parameters.duration)))
+        return sendError(res,400,'视频复刻支持 9:16、768P，时长为 5 秒、10 秒或 15 秒');
+    }
     for (const key of Object.keys(parameters)) {
       if (/^ref_(?:image|audio|video)_\d+$/.test(key) || key === 'first_frame' || key === 'last_frame') delete parameters[key];
     }
@@ -2859,7 +2879,7 @@ const ROUTES = {
     if (parameters.duration != null) {
       const duration = Number(parameters.duration);
       if (!AUTODL_VIDEO_DURATIONS.has(duration)) {
-        return sendError(res, 400, '当前视频生成仅支持 3 秒、5 秒、10 秒或 15 秒', { allowed: [...AUTODL_VIDEO_DURATIONS] });
+        return sendError(res, 400, '当前视频生成仅支持 5 秒、10 秒或 15 秒', { allowed: [...AUTODL_VIDEO_DURATIONS] });
       }
       parameters.duration = duration;
     }
@@ -2897,7 +2917,7 @@ const ROUTES = {
       return serializeVideoGeneration(failed);
     };
     try {
-      upstream = await autodlRequest(`/comfyui_workflow/${encodeURIComponent(workflow)}`, {
+      upstream = mode === 'recreation' ? await submitRecreation(prompt, parameters, references) : await autodlRequest(`/comfyui_workflow/${encodeURIComponent(workflow)}`, {
         method: 'POST',
         body: { ...parameters, prompt },
       });

@@ -2089,7 +2089,7 @@ async function addAssetToCreation(asset) {
       renderReferencePreviews();
     }
     switchPage('home'); window.scrollTo({ top: 0, behavior: 'smooth' });
-    toast(asset.kind === 'text' ? '提示词已填入创作区' : asset.kind === 'image' ? '已添加到创作参考' : asset.kind === 'video' ? '已添加到视频复刻参考区；生成服务待开通' : '已添加到参考区；当前生成模型不支持音频参考');
+    toast(asset.kind === 'text' ? '提示词已填入创作区' : asset.kind === 'image' ? '已添加到创作参考' : asset.kind === 'video' ? '已添加到视频复刻参考区' : '已添加到参考区；当前生成模型不支持音频参考');
   } catch (err) { toast(err.message); }
 }
 
@@ -2273,8 +2273,15 @@ function syncGenerationMode({ clear = false } = {}) {
   const mode = currentGenerationMode();
   const textOnly = mode === 'text';
   const recreation = mode === 'recreation';
+  for (const [id, allowed, fallback] of [['videoDuration',['5','10','15'],'5'],['videoResolution',['768p'],'768p']]) {
+    const select=document.getElementById(id);
+    if (!select) continue;
+    for (const option of select.options) { option.disabled=recreation && !allowed.includes(option.value); option.hidden=option.disabled; }
+    if (select.selectedOptions[0]?.disabled) select.value=fallback;
+  }
+  syncPreviewSpec();
   if (referenceInput) referenceInput.accept = recreation
-    ? 'image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm,.jpg,.jpeg,.png,.webp,.mp4,.mov,.m4v,.webm'
+    ? 'image/jpeg,image/png,image/webp,video/mp4,video/quicktime,.jpg,.jpeg,.png,.webp,.mp4,.mov'
     : 'image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp';
   const targetControl = document.getElementById('recreationTargetControl');
   if (targetControl) targetControl.hidden = !recreation;
@@ -2296,7 +2303,7 @@ function syncGenerationMode({ clear = false } = {}) {
   if (status && !generationBusy) {
     status.textContent = textOnly
       ? '文生视频无需参考文件，输入描述即可生成'
-      : recreation ? '视频复刻暂未开通；可先准备 1 个最长 15 秒的参考视频与替换图片'
+      : recreation ? '添加 1 个 2–15 秒的 MP4/MOV 视频与替换图片；768P，5/10/15 秒'
         : mode === 'keyframes'
         ? '请添加正好 2 张图片：第一张作为首帧，第二张作为尾帧'
         : '请添加 1–9 张 JPG、PNG 或 WebP 参考图片';
@@ -2361,7 +2368,8 @@ if (referenceInput) {
       try {
         const durationSec = kind === 'video' ? await probeDuration(file) : null;
         if (requestEpoch !== workspaceEpoch || mode !== currentGenerationMode()) return;
-        if (kind === 'video' && (!durationSec || durationSec > 15)) { rejected += 1; toast('参考视频必须可读取且时长不超过 15 秒'); continue; }
+        if (kind === 'video' && (!durationSec || durationSec < 2 || durationSec > 15 || file.size > 50 * 1024 ** 2)) { rejected += 1; toast('参考视频需为 2–15 秒，大小不超过 50 MB'); continue; }
+        if (mode === 'recreation' && kind === 'image' && file.size > 30 * 1024 ** 2) { rejected += 1; toast('参考图片不能超过 30 MB'); continue; }
         const item = { id: nextReferenceId(), kind, file, durationSec, url: URL.createObjectURL(file) };
         referenceFiles.push(item); newItems.push(item);
         added += 1;

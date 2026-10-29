@@ -1,38 +1,21 @@
-# 视频复刻接入记录（2026-10-28）
+# MiniMax H3 视频复刻（2026-10-29）
 
-## 已确定的产品要求
+视频复刻使用 AutoDL **模型广场**的 MiniMax-H3 V2，不使用仅接受图片的 ComfyUI 工作流，也不抽帧代替视频参考。文生视频、多图、首尾帧继续走现有 ComfyUI；所有方式只提供 5/10/15 秒和 9:16。
 
-- 沿用现有 MiniMax H3 模型和服务选择，不连接 HypiHub，不切换 Wan 模型。
-- 必须保留参考视频的动作，不接受抽取关键帧后重新生成作为替代。
-- 参考视频必填、只能 1 个、真实时长不超过 15 秒；至少添加 1 张替换图片，最多 9 张。
-- 可选择替换主体或替换背景。现有账号隔离、单生成任务、进度、结果资产规则继续适用。
+## 协议和配置
 
-## 本地已实现
+- 默认地址 `https://www.autodl.art/api/v1/minimax`，可用 `AUTODL_H3_API_BASE` 覆盖。
+- 服务端令牌 `AUTODL_H3_API_TOKEN`，缺省沿用现有 `AUTODL_API_TOKEN`，不发给前端。
+- 创建：`POST /v2/video_generation`；模型 `MiniMax-H3`，768P，ratio `9:16`。
+- `content` 同时携带 text、`video_url: {url}` / `role:reference_video`、`image_url:{url}` / `role:reference_image`。URL 为现有的限时签名公网链接。
+- 查询：`GET /v2/query/video_generation/{task_id}`；读取 `task.status`、`task.content.url` 和失败原因。输出视频时长不作为处理耗时。
+- 参考视频 1 个、MP4/MOV、2–15 秒、最多 50 MB；替换图片 1–9 张、JPG/PNG/WebP、每张最多 30 MB。实际时长由 FFprobe 检查。
+- 替换主体时要求保留背景；替换背景时要求保留主体。两者都要求保留动作、节奏和镜头。模型是生成式参考，实际动作还原程度需验收输出，不能承诺逐帧相同。
+- 批量复刻沿用逐条排队；不同版本只在允许替换的区域变化灯光、材质细节，不添加新的运镜。V2 未声明 seed，不向该接口发送种子。
+- 任务、资产按账号隔离；进行中禁止删除和再次提交。结果和素材留在资产，删除任务仅清理创作页展示。
 
-- 创作方式增加“视频复刻 · 待开通”，显示替换内容选择、视频/图片参考上传及数量提示。
-- 视频缩略图显示参考视频及其时长，图片显示主体/背景用途。
-- 前端预检查时长，服务器使用 FFprobe 验证实际视频流与真实时长；资产中的视频加入复刻参考时同样检查。
-- 超时长上传不落入参考库；提交接口验证参考类型、数量、归属及替换目标。
-- 接口没有配置时返回 `503 / RECREATION_WORKFLOW_NOT_CONFIGURED`，不提交付费任务、不降级为图片生成。
-- 配置接口公开 `videoGeneration.recreation.ready=false` 及当前能力限制，前端阻止生成提交。
-- 28 项测试通过，包括 15 秒边界、15.01 秒拒绝、资产复用超时长拒绝、必填素材及不触发图片工作流。
+## 验证范围
 
-## 实际服务能力核对
+AutoDL 模型详情公开元数据确认模型 ID 80 与上述创建地址。服务器使用现有令牌查询不存在的测试任务，返回 task not found，而非鉴权失败。自动化测试使用本地模拟服务验证字段、原视频传递、排队、状态、失败、资产以及账号隔离；没有发起付费生成，真实生成效果仍需实际任务验收。
 
-依据 AutoDL 官方网页实际使用的公开元数据接口查询：
-
-- 工作流列表：`POST https://www.autodl.art/api/v1/comfyui/workflows`，请求 `{page_index:1,page_size:100}`。
-- 单工作流规则：`GET https://www.autodl.art/api/v1/comfyui/workflows/{workflowId}`。
-- 当次返回 24 个工作流，逐个读取全部输入规则。
-- 当前的 `minimax_h3_lightx2v_v5_15s` 只接受 `ref_image_0` 至 `ref_image_8`、提示词、时长、分辨率、种子，不接受视频输入。
-- 此次目录里唯一声明视频输入的工作流为 `wan2.2animate-v4-motion_retargeting`，字段为 `ref_video`、`ref_image`、分辨率、种子。该模型不符合用户指定的 MiniMax H3，未采用。
-
-官方入口：[AutoDL 工作流目录](https://www.autodl.art/large-model/comfyui)、[当前 H3 多图工作流](https://www.autodl.art/large-model/comfyui/minimax_h3_lightx2v_v5_15s)。
-
-## 尚需接入
-
-需要能同时接收参考视频与替换图片的 MiniMax H3 接口文档或工作流 ID，并明确视频/图片字段、时长与画幅限制、任务查询方式和原动作保留能力。不能从“模型名称相同”推断某个工作流支持这些输入，也不能向当前图片工作流添加未声明的字段。
-
-Hypit 技能用于检查素材角色、动作保留要求和模型能力边界；它本身不提供推理模型或账户额度。已阅读技能和模型/Provider 指南，但没有安装 Hypit Runtime、连接新服务、发起付费生成或升级生产 Node。实际服务调用等待上述 API 契约确认。
-
-发布时仅包含上述素材准备和校验能力，复刻生成仍保持 `ready=false`。没有接入新服务，没有将图片工作流当成保留原动作的视频复刻。
+协议依据：[MiniMax H3 创建](https://platform.minimax.cn/docs/api-reference/video-generation-v2-create)、[任务查询](https://platform.minimax.cn/docs/api-reference/video-generation-v2-query)。

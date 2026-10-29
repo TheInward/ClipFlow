@@ -7,7 +7,7 @@
 <meta name="description" content="ClipFlow AI 是一站式 AI 视频创作平台，支持文字与参考素材生成视频，并提供字幕处理、画质增强、视频压缩与资产管理。" />
 <meta name="color-scheme" content="light" />
 <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-<link rel="stylesheet" href="/styles.css?v=202610282356" />
+<link rel="stylesheet" href="/styles.css?v=202610290916" />
 </head>
 <body>
 
@@ -101,7 +101,7 @@
             </label>
 
             <label class="composer-select model-select"><span class="select-icon" aria-hidden="true">◉</span><select id="videoWorkflow" aria-label="视频模型"><option value="minimax_h3_lightx2v_no_pic">MiniMax H3</option></select></label>
-            <label class="composer-select"><span class="select-icon" aria-hidden="true">▧</span><select id="generationMode" aria-label="创作方式"><option value="text">文生视频</option><option value="multi_image">多图生视频</option><option value="keyframes">首尾帧生视频</option><option value="recreation">视频复刻 · 待开通</option></select></label>
+            <label class="composer-select"><span class="select-icon" aria-hidden="true">▧</span><select id="generationMode" aria-label="创作方式"><option value="text">文生视频</option><option value="multi_image">多图生视频</option><option value="keyframes">首尾帧生视频</option><option value="recreation">视频复刻</option></select></label>
             <label class="composer-select" id="recreationTargetControl" hidden><select id="recreationTarget" aria-label="替换内容"><option value="subject">替换主体</option><option value="background">替换背景</option></select></label>
 
             <div class="composer-specs">
@@ -109,7 +109,7 @@
               <span>/</span>
               <label><select id="videoResolution" aria-label="清晰度"><option value="768p">768P</option><option value="480p">480P</option></select></label>
               <span>/</span>
-              <label><select id="videoDuration" aria-label="时长"><option value="3">3 秒</option><option value="5" selected>5 秒</option><option value="10">10 秒</option><option value="15">15 秒</option></select></label>
+              <label><select id="videoDuration" aria-label="时长"><option value="5" selected>5 秒</option><option value="10">10 秒</option><option value="15">15 秒</option></select></label>
               <span>/</span>
               <label><select id="videoCount" aria-label="生成条数"><option value="1">1 条</option><option value="2">2 条</option><option value="3">3 条</option><option value="5">5 条</option><option value="10">10 条</option></select></label>
             </div>
@@ -119,7 +119,7 @@
               <button class="creation-submit" type="button" id="homeCmdGo" aria-label="生成视频">↑</button>
             </div>
           </div>
-          <p class="recreation-help" id="recreationHelp" hidden>添加 1 个不超过 15 秒的参考视频，以及 1–9 张替换图片。视频参考生成功能暂未开通。</p>
+          <p class="recreation-help" id="recreationHelp" hidden>添加 1 个 2–15 秒的 MP4/MOV 视频（最多 50 MB）和 1–9 张替换图片。保留原视频动作与镜头，按图片替换主体或背景；效果以模型输出为准。</p>
           <p class="creation-tip" id="generationStatus">文生视频无需参考文件，输入描述即可生成</p>
           <p class="creation-tip" id="generationBatchHint" hidden></p>
         </section>
@@ -392,7 +392,7 @@
   </div><!-- /shell -->
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/app.js?v=202610282356" type="module"></script>
+  <script src="/app.js?v=202610290916" type="module"></script>
   <div class="admin-mask" id="adminMask" hidden>
     <div class="admin-panel" role="dialog" aria-modal="true" aria-labelledby="adminTitle">
       <div class="admin-head">

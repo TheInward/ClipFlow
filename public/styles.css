@@ -1619,3 +1619,19 @@ body{background:var(--canvas)}
 .asset .a-thumb audio{width:90%;max-width:100%;z-index:1}
 .asset-text-preview{padding:25px 18px;max-height:155px;overflow:hidden;font-size:13px;line-height:1.7;color:var(--ink-2);white-space:pre-wrap;overflow-wrap:anywhere}
 @media(max-width:640px){.asset-tools{width:100%}.asset-tools .search2{flex:1;min-width:120px}.generation-result-actions .btn{flex:1}}
+
+/* 去水印任务共用一处预览，卡片切换不影响其他任务。 */
+.watermark-selector { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(245px,300px); gap:12px; overflow-x:auto; padding:18px; }
+.watermark-selector .row { display:grid; grid-template-columns:20px 26px 1fr; gap:8px; align-items:start; margin:0; padding:14px; border:1px solid var(--line); border-radius:14px; background:#fafafa; cursor:pointer; }
+.watermark-selector .row.is-open { border-color:var(--ink); background:#f1f1f3; }
+.watermark-selector .row:focus-visible { outline:2px solid var(--ink); outline-offset:2px; }
+.watermark-selector .thumb { display:none; }
+.watermark-selector .row-main { min-width:0; }
+.watermark-selector .row-title { display:block; }
+.watermark-selector .name { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.watermark-selector .meta { display:block; margin-top:4px; font-size:11px; }
+.watermark-selector .row-sub { flex-wrap:wrap; }
+.watermark-selector .stage { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.watermark-selector .row-actions { grid-column:1 / -1; justify-content:flex-end; flex-wrap:wrap; }
+.watermark-selector + .panel { margin:0 18px 18px; }
+@media(max-width:640px) { .watermark-selector { padding:12px;grid-auto-columns:85%; } .watermark-selector + .panel { margin:0 12px 12px; } }

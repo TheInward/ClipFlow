@@ -755,8 +755,42 @@ function patchRows(rows) {
   }
 }
 
+function renderWatermarkTasks(rows) {
+  if (!rows.some(row=>row.key===state.openKey)) state.openKey=rows.at(-1)?.key || null;
+  let selector=el.list.querySelector('.watermark-selector');
+  if (!selector) {
+    el.list.querySelectorAll('video,audio').forEach(media=>media.pause());
+    el.list.replaceChildren();
+    selector=document.createElement('div');selector.className='watermark-selector';
+    selector.setAttribute('aria-label','切换去水印任务');el.list.appendChild(selector);
+  }
+  const sig=structureSig(rows);
+  if (selector.dataset.signature !== sig) {
+    selector.replaceChildren(...rows.map(row=>rowNode(row,{switchPreview:true})));
+    selector.dataset.signature=sig;
+  }
+  const selected=rows.find(row=>row.key===state.openKey);
+  const panelSignature=selected ? JSON.stringify([selected.key,selected.status,selected.previewUrl,selected.sourceUrl,selected.error]) : '';
+  let panel=el.list.querySelector('.panel');
+  if ((panel?.dataset.signature || '') !== panelSignature) {
+    panel?.querySelectorAll('video,audio').forEach(media=>media.pause());panel?.remove();
+    if (selected) {
+      panel=panelNode(selected);panel.dataset.signature=panelSignature;
+      panel.querySelector('.panel-head .btn')?.remove();el.list.appendChild(panel);
+    }
+  }
+  patchRows(rows);
+}
+
 function renderNow() {
   const rows = viewRows();
+  if (state.tab === 'link') {
+    renderWatermarkTasks(rows);pruneSelection(rows);renderSummary(rows);renderDiskWarn();renderBatchButtons(rows);
+    el.quota.textContent=`${rows.length} / ${state.config?.maxBatchSize || 30}`;
+    el.batchCard.hidden=rows.length===0;lastSig='';
+    try { syncToolsAside(); } catch {}
+    return;
+  }
   const sig = structureSig(rows);
   if (sig === lastSig) {
     pruneSelection(rows);
@@ -787,7 +821,7 @@ function renderNow() {
   try { syncToolsAside(); } catch { /* 忽略 */ }
 }
 
-function rowNode(r) {
+function rowNode(r, {switchPreview=false} = {}) {
   const label = STATUS_LABEL[r.status] || { text: r.status, cls: '' };
   // 处理中的进度不放在行内（去目标视频面板里显示），行内进度条只用于上传/校验
   const showRowBar = r.status === 'uploading' || r.status === 'hashing';
@@ -834,10 +868,17 @@ function rowNode(r) {
   });
   node.addEventListener('click', (e) => {          // 点行空白处也能勾选
     if (e.target.closest('.btn') || e.target.closest('.check') || e.target.closest('video') || e.target.closest('a')) return;
+    if (switchPreview) { state.openKey=r.key;render();return; }
     box.checked = !box.checked;
     box.dispatchEvent(new Event('change'));
   });
-  mk(state.openKey === r.key ? '预览 ▾' : '预览 ▸', 'btn-ghost btn-preview', true, () => togglePreview(r.key));
+  if (switchPreview) {
+    node.tabIndex=0;node.setAttribute('aria-label',`切换到第 ${r.index} 个任务：${r.fileName}`);
+    node.addEventListener('keydown',event=>{
+      if (event.target === node && ['Enter',' '].includes(event.key)) {event.preventDefault();state.openKey=r.key;render();}
+    });
+  }
+  if (!switchPreview) mk(state.openKey === r.key ? '预览 ▾' : '预览 ▸', 'btn-ghost btn-preview', true, () => togglePreview(r.key));
   const act = rowAction(r);
   mk(act.text, act.cls, act.enabled, act.fn);
   // 上传阶段的本地行：允许取消
@@ -1819,6 +1860,7 @@ async function addLinkBatch() {
     state.batchId = res.batch.id;
     try { const key = batchStorageKey(); if (key) localStorage.setItem(key, state.batchId); } catch { /* 忽略 */ }
     applyBatch(res);
+    state.openKey=viewRows().at(-1)?.key || null;
     // 新任务自动开始；失败或余额不足时保留在列表中，方便重试。
     const fresh = viewRows().filter((r) => r.status === 'idle');
     fresh.forEach((r) => state.selected.add(r.key));

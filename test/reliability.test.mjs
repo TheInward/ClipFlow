@@ -815,3 +815,30 @@ test('H3 protocol rejects malformed status and recreation variants retain source
     assert.doesNotMatch(variant.prompt,/镜头：/);
   }
 });
+
+test('watermark task switcher keeps one panel and does not restart it on other task updates',async()=>{
+  const source=await fs.readFile(new URL('../public/app.js',import.meta.url),'utf8');
+  const fn=source.slice(source.indexOf('function renderWatermarkTasks('),source.indexOf('function renderNow()'));
+  let builds=0,pauses=0;
+  class Node {
+    constructor(className=''){this.className=className;this.children=[];this.dataset={};}
+    setAttribute(){}
+    appendChild(node){node.parent=this;this.children.push(node);return node;}
+    replaceChildren(...nodes){this.children=[];nodes.forEach(n=>this.appendChild(n));}
+    querySelector(selector){return this.children.find(n=>n.className===selector.slice(1))||null;}
+    querySelectorAll(){return this.className==='panel'?[{pause(){pauses++;}}]:[];}
+    remove(){this.parent.children=this.parent.children.filter(n=>n!==this);}
+  }
+  const list=new Node();const state={openKey:null};
+  const context={state,el:{list},document:{createElement:()=>new Node()},
+    structureSig:rows=>JSON.stringify([rows.map(r=>[r.key,r.status]),state.openKey]),
+    rowNode:()=>new Node('row'),panelNode:()=>{builds++;return new Node('panel');},patchRows(){}};
+  vm.runInNewContext(fn,context);
+  const rows=[{key:'one',status:'running'},{key:'two',status:'done',previewUrl:'/two.mp4'}];
+  context.renderWatermarkTasks(rows);assert.equal(state.openKey,'two');assert.equal(builds,1);
+  rows[0].status='done';context.renderWatermarkTasks(rows);assert.equal(builds,1);assert.equal(pauses,0);
+  state.openKey='one';context.renderWatermarkTasks(rows);assert.equal(builds,2);assert.equal(pauses,1);
+  assert.equal(list.children.filter(n=>n.className==='panel').length,1);
+  context.renderWatermarkTasks(rows.slice(1));assert.equal(state.openKey,'two');assert.equal(builds,3);
+  context.renderWatermarkTasks([]);assert.equal(state.openKey,null);assert.equal(list.children.filter(n=>n.className==='panel').length,0);
+});

@@ -16,7 +16,7 @@ export async function validateRecreationReferences(references, { dataDir, replac
   const videos = references.filter((item) => item.kind === 'video');
   const images = references.filter((item) => item.kind === 'image');
   if (videos.length !== 1) throw fail('视频复刻必须添加且只能添加 1 个参考视频');
-  if (images.length < 1 || images.length > 9) throw fail('视频复刻需要 1–9 张用于替换主体或背景的参考图片');
+  if (images.length > 9) throw fail('视频复刻最多支持 9 张替换图片');
   if (references.length !== videos.length + images.length) throw fail('视频复刻仅支持视频和图片参考，不支持音频参考');
   if (images.some((item) => !['.jpg', '.jpeg', '.png', '.webp'].includes(item.ext))) throw fail('替换图片仅支持 JPG、PNG、WebP');
   if (!['.mp4','.mov'].includes(videos[0].ext)) throw fail('视频复刻仅支持 MP4、MOV 视频');

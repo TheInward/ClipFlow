@@ -2319,6 +2319,7 @@ function updateCreationWorkspace(next) {
     tab.classList.toggle('is-active',selected);tab.setAttribute('aria-pressed',String(selected));
   });
   document.getElementById('creationWorkspace')?.classList.toggle('is-recreation',next);
+  const hypitLabel=document.getElementById('hypitModelLabel');if(hypitLabel)hypitLabel.hidden=!next;
   const modeControl=generationModeSelect?.closest('.composer-select');if(modeControl)modeControl.hidden=next;
 }
 
@@ -2359,24 +2360,24 @@ function syncGenerationMode({ clear = false } = {}) {
   const targetControl = document.getElementById('recreationTargetControl');
   if (targetControl) targetControl.hidden = !recreation;
   const help = document.getElementById('recreationHelp');
-  if (help) help.hidden = !recreation;
+  if (help) {help.hidden = !recreation;help.textContent = 'Hypit 复刻：上传 1 个 2–15 秒的 MP4/MOV 视频（≤50 MB），可选添加最多 9 张图片。' + (state.config?.videoGeneration?.recreation?.ready ? '根据参考视频与描述制作新作品，动作还原程度取决于视频模型。' : '视频模型接口待配置，暂不能开始复刻。');}
   if (homeGo) {
     homeGo.disabled = generationBusy || (recreation && !state.config?.videoGeneration?.recreation?.ready);
-    homeGo.title = recreation && !state.config?.videoGeneration?.recreation?.ready ? '视频参考生成功能暂未开通' : '生成视频';
+    homeGo.title = recreation && !state.config?.videoGeneration?.recreation?.ready ? 'Hypit 视频模型待配置' : '生成视频';
   }
   if (referenceInput) referenceInput.disabled = textOnly || generationBusy;
   referenceTrigger?.classList.toggle('is-disabled', textOnly);
   if (referenceTrigger) {
     referenceTrigger.title = textOnly
       ? '文生视频无需参考图片'
-      : recreation ? '添加 1 个最长 15 秒的视频和 1–9 张替换图片'
+      : recreation ? '添加 1 个 2–15 秒的参考视频，可选添加最多 9 张图片'
         : mode === 'keyframes' ? '添加首帧与尾帧图片' : '添加 1–9 张参考图片';
   }
   const status = document.getElementById('generationStatus');
   if (status && !generationBusy) {
     status.textContent = textOnly
       ? '文生视频无需参考文件，输入描述即可生成'
-      : recreation ? '添加 1 个 2–15 秒的 MP4/MOV 视频与替换图片；768P，5/10/15 秒'
+      : recreation ? '上传参考视频，可选添加替换图片；5/10/15 秒'
         : mode === 'keyframes'
         ? '请添加正好 2 张图片：第一张作为首帧，第二张作为尾帧'
         : '请添加 1–9 张 JPG、PNG 或 WebP 参考图片';
@@ -2642,6 +2643,9 @@ function renderGenerationPreview(generation) {
       ? (recreationWorkspace ? '本批次依次复刻，沿用原视频动作与镜头，仅在替换区域变化细节。每条按服务商规则独立计费。' : '本批次依次生成，每条使用不同的镜头、光线和场景细节；完成的版本可点击预览。每条按服务商规则独立计费。')
       : '本批次已结束，成功的视频已保存到资产。失败或重复结果不会自动付费重试。';
   }
+  if (generation.mode==='recreation' && generation.workflow && generation.workflow!=='hypit-recreation' && generationProgressNote) {
+    generationProgressNote.textContent='这是切换前的 MiniMax H3 历史任务。新复刻任务使用 Hypit 流程。';
+  }
   if (resultUrl && generationVideo) {
     if (generationVideo.getAttribute('src') !== resultUrl) { generationVideo.pause(); generationVideo.src = resultUrl; }
     generationVideo.hidden = false;
@@ -2773,11 +2777,11 @@ async function runHomeCommand() {
   }
   const mode = currentGenerationMode();
   if (mode === 'recreation' && !state.config?.videoGeneration?.recreation?.ready) {
-    toast('视频参考生成功能暂未开通，请先完成模型接口接入'); return;
+    toast('视频复刻模型尚未配置，请联系管理员接入视频模型'); return;
   }
   if (mode !== 'recreation' && referenceFiles.some((item) => item.kind !== 'image')) { toast('当前生成接口仅接受图片参考，请移除视频和音频后生成'); return; }
-  if (mode === 'recreation' && (referenceFiles.filter((item)=>item.kind==='video').length !== 1 || referenceFiles.filter((item)=>item.kind==='image').length < 1 || referenceFiles.some((item)=>item.kind==='audio'))) {
-    toast('视频复刻需要 1 个最长 15 秒的视频和 1–9 张替换图片'); return;
+  if (mode === 'recreation' && (referenceFiles.filter((item)=>item.kind==='video').length !== 1 || referenceFiles.some((item)=>item.kind==='audio'))) {
+    toast('视频复刻需要 1 个 2–15 秒的参考视频，可选添加最多 9 张替换图片'); return;
   }
   if (mode === 'text' && referenceFiles.length) {
     toast('文生视频不需要参考图片，请移除图片后再提交');

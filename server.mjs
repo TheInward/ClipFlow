@@ -26,7 +26,8 @@ import { enhanceVideo, runAsr, toSrt, runTranscode, runOcr, runToolVideo } from 
 import { ZipStream, streamRemote } from './zip.mjs';
 import { probeVideoDuration, probeAvailable, probeVideoSize } from './media.mjs';
 import { assertRecreationVideo, validateRecreationReferences } from './recreation.mjs';
-import { buildRecreationPayload, normalizeH3Response } from './minimax-h3.mjs';
+import { hypitConfiguration, submitHypitRecreation, queryHypitRecreation } from './hypit-recreation.mjs';
+import { normalizeH3Response } from './minimax-h3.mjs';
 import { createGenerationVariants, GENERATION_COUNTS } from './video-variants.mjs';
 import { normalizePhone, findUserByPhone, createUser, checkPassword, publicUser, createUserSession, chargeSeconds, refundSeconds, createCodes, redeemCode, ensureAdmin, setPassword, touchSession, SESSION_TTL_MS } from './accounts.mjs';
 import { take as takeToken, stats as rateStats } from './ratelimit.mjs';
@@ -2311,8 +2312,7 @@ async function autodlRequest(pathname, { method = 'GET', body, h3 = false } = {}
 }
 
 async function submitRecreation(prompt, parameters, references) {
-  return autodlRequest('/v2/video_generation', {method:'POST', h3:true,
-    body:buildRecreationPayload({prompt, parameters, references, referenceUrl:publicReferenceUrl})});
+  return submitHypitRecreation({prompt:`${prompt}\n\n${VIDEO_GENERATION_CONSTRAINTS}`,parameters,references,dataDir:DATA_DIR});
 }
 
 function safeWorkflowId(input) {
@@ -2406,7 +2406,9 @@ async function pollVideoGenerations() {
 
 async function fetchVideoGenerationStatus(item) {
   if (!item || !item.taskId || VIDEO_GENERATION_TERMINAL.has(item.status)) return item;
-  const upstream = await autodlRequest(item.mode === 'recreation'
+  const upstream = item.workflow === 'hypit-recreation'
+    ? await queryHypitRecreation(item.taskId,{dataDir:DATA_DIR})
+    : await autodlRequest(item.mode === 'recreation'
     ? `/v2/query/video_generation/${encodeURIComponent(item.taskId)}`
     : `/comfyui_workflow/result/${encodeURIComponent(item.taskId)}`, {h3:item.mode === 'recreation'});
   if (upstream?.code !== 'Success' || !upstream?.data) {
@@ -2419,6 +2421,17 @@ async function fetchVideoGenerationStatus(item) {
   item.duration = data.duration ?? item.duration ?? null;
   item.startedAt = data.started_at || item.startedAt || null;
   item.results = Array.isArray(data.results) ? data.results : [];
+  if (item.workflow === 'hypit-recreation' && data.outputPath) {
+    const assetId=`generation:${item.taskId}:0`;
+    if (!db.assetTombstones[assetId]) {
+      const name=crypto.createHash('sha256').update(assetId).digest('hex')+'.mp4';
+      await probeVideoDuration(data.outputPath);
+      const dest=path.join(ASSET_DIR,name);await fsp.copyFile(data.outputPath,dest);
+      const stat=await fsp.stat(dest);
+      db.assets[assetId]={id:assetId,userId:item.userId,kind:'video',ext:'.mp4',mime:'video/mp4',name:'视频复刻-'+item.taskId+'.mp4',source:'generation',state:'ready',size:stat.size,storedPath:path.relative(DATA_DIR,dest),createdAt:new Date().toISOString()};
+      item.results=[`${baseUrl()}/api/assets/${encodeURIComponent(assetId)}/content`];
+    }
+  }
   if (VIDEO_GENERATION_TERMINAL.has(item.status) && item.status !== 'SUCCESS') {
     const failure = String(data?.error?.message || data?.error_message || data?.message || data?.msg || data?.failure_reason || data?.reason || '').trim();
     item.error = failure || item.error || '云端任务已终止，但接口没有返回具体原因。';
@@ -2523,6 +2536,10 @@ async function advanceVideoBatch(batch) {
       batch.error = variant.error; batch.failureStage = 'submission';
       batch.variants.filter((item) => item.status === 'PENDING').forEach((item) => {item.status='SKIPPED';item.error='前序提交状态不明确，未提交';});
       finishVideoBatch(batch); return batch;
+    }
+    if (batch.mode === 'recreation' && batch.workflow !== 'hypit-recreation') {
+      batch.variants.filter(item=>item.status==='PENDING').forEach(item=>{item.status='SKIPPED';item.error='复刻引擎已切换到 Hypit，未继续提交旧 H3 任务';});
+      finishVideoBatch(batch);return batch;
     }
     variant.status = 'SUBMITTING'; batch.status = 'RUNNING';
     batch.updatedAt = new Date().toISOString();
@@ -2797,11 +2814,11 @@ const ROUTES = {
         durations:[...AUTODL_VIDEO_DURATIONS],
         counts:[...GENERATION_COUNTS],
         recreation: {
-          ready: !!AUTODL_H3_API_TOKEN, minVideoSeconds:2, maxVideoSeconds: 15, maxVideos: 1, maxImages: 9,
+          ready: hypitConfiguration().ready, engine:'Hypit', missing:hypitConfiguration().missing, minVideoSeconds:2, maxVideoSeconds: 15, maxVideos: 1, maxImages: 9,
           durations:[5,10,15], resolutions:['768p竖'],
-          reason: AUTODL_H3_API_TOKEN ? '' : '视频复刻服务尚未配置',
+          reason: hypitConfiguration().reason,
         },
-        ready: AUTODL_READY,
+        ready: AUTODL_READY || hypitConfiguration().ready,
         provider: 'AutoDL ComfyUI',
         workflow: AUTODL_VIDEO_WORKFLOW,
         imageWorkflow: AUTODL_IMAGE_VIDEO_WORKFLOW,
@@ -2810,7 +2827,7 @@ const ROUTES = {
           text: AUTODL_VIDEO_WORKFLOW,
           multi_image: AUTODL_IMAGE_VIDEO_WORKFLOW,
           keyframes: AUTODL_KEYFRAME_VIDEO_WORKFLOW,
-          recreation:'MiniMax-H3',
+          recreation:'hypit-recreation',
         },
         referenceUpload: '/api/video-references',
         referenceTtlHours: UPLOAD_TTL_MS / 3600000,
@@ -2822,7 +2839,6 @@ const ROUTES = {
   },
 
   'POST /api/video-generations': async (req, res) => {
-    if (!AUTODL_READY) return sendError(res, 503, '视频生成服务尚未配置');
     const user = currentUser(req);
     let active = videoGenerationForUser(user.id, true);
     if (active) {
@@ -2842,6 +2858,7 @@ const ROUTES = {
     if (prompt.length > 1000) return sendError(res, 400, '视频描述不能超过 1000 字');
     const mode = String(body.mode || '').trim();
     if (!VIDEO_GENERATION_MODES.has(mode)) return sendError(res, 400, '请选择有效的生成方式');
+    if (mode !== 'recreation' && !AUTODL_READY) return sendError(res,503,'视频生成服务尚未配置');
     const referenceIds = Array.isArray(body.referenceIds) ? [...new Set(body.referenceIds.map(String))] : [];
     if (referenceIds.length > (mode === 'recreation' ? 10 : 9)) return sendError(res, 400, '参考素材数量超过当前生成方式上限');
     const references = referenceIds.map((referenceId) => db.references[referenceId]);
@@ -2853,7 +2870,8 @@ const ROUTES = {
     }
     if (mode === 'recreation') {
       await validateRecreationReferences(references, {dataDir: DATA_DIR, replacementTarget: body.replacementTarget});
-      if (!AUTODL_H3_API_TOKEN) return sendError(res,503,'视频复刻服务尚未配置');
+      const hypit=hypitConfiguration();
+      if (!hypit.ready) return sendError(res,503,hypit.reason,{errorCode:'HYPIT_NOT_CONFIGURED'});
     }
     if (mode !== 'recreation' && references.some((reference) => reference.kind !== 'image' || !IMAGE_REFERENCE_EXT.has(reference.ext))) {
       return sendError(res, 415, '视频生成参考文件仅支持 JPG、PNG、WebP 图片');
@@ -2865,7 +2883,7 @@ const ROUTES = {
     if (mode === 'keyframes' && references.length !== 2) {
       return sendError(res, 400, '首尾帧生视频需要正好 2 张图片：第一张为首帧，第二张为尾帧');
     }
-    const expectedWorkflow = mode === 'recreation' ? 'MiniMax-H3' : mode === 'text'
+    const expectedWorkflow = mode === 'recreation' ? 'hypit-recreation' : mode === 'text'
       ? AUTODL_VIDEO_WORKFLOW
       : mode === 'multi_image' ? AUTODL_IMAGE_VIDEO_WORKFLOW : AUTODL_KEYFRAME_VIDEO_WORKFLOW;
     const workflow = mode === 'recreation' ? String(body.workflow || expectedWorkflow) : safeWorkflowId(body.workflow || expectedWorkflow);

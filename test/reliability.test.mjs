@@ -209,7 +209,7 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
   await t.test('video generation maps text, multi-image and keyframe modes to exact AutoDL workflows', async () => {
     const config = await api('/api/config');
     assert.deepEqual(config.data.videoGeneration.workflows, {
-      recreation:'MiniMax-H3', text:'minimax_h3_lightx2v_no_pic', multi_image:'minimax_h3_lightx2v_v5_15s', keyframes:'minimax_h3_lightx2v',
+      recreation:'hypit-recreation', text:'minimax_h3_lightx2v_no_pic', multi_image:'minimax_h3_lightx2v_v5_15s', keyframes:'minimax_h3_lightx2v',
     });
     const horizontal = await api('/api/video-generations',{user:'admin',method:'POST',body:{
       mode:'text', workflow:'minimax_h3_lightx2v_no_pic', prompt:'invalid ratio', parameters:{duration:5,resolution:'768p横'}, referenceIds:[],
@@ -343,67 +343,22 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     assert.equal((await api(`/api/video-generations/${first.data.taskId}`,{user:'serial',method:'DELETE'})).status,409);
     assert.equal((await api('/api/video-generations',{user:'serial',method:'POST',body:JSON.parse(payload)})).status,409);
   });
-  await t.test('recreation requires one real video of at most 15 seconds and replacement images without falling back to image generation',async()=>{
-    const uploadVideo=async(duration,purpose='recreation')=>api('/api/video-references',{user:'recreation',method:'POST',raw:String(duration),
-      headers:{'X-File-Name':'reference.mp4','Content-Type':'video/mp4','x-reference-purpose':purpose}});
-    const before=videoWorkflowCalls.length;
-    const longUpload=await uploadVideo(15.01);
-    assert.equal(longUpload.status,400); assert.match(longUpload.data.error,/15 秒/);
-    const genericLong=await uploadVideo(16,'asset'); assert.equal(genericLong.status,201);
-    const video=await uploadVideo(15); assert.equal(video.status,201);
-    assert.equal(video.data.reference.durationSec,15);
+  await t.test('Hypit recreation validates references and blocks unconfigured models without calling H3',async()=>{
+    const uploadVideo=async(duration)=>api('/api/video-references',{user:'recreation',method:'POST',raw:String(duration),headers:{'X-File-Name':'reference.mp4','Content-Type':'video/mp4','x-reference-purpose':'recreation'}});
+    assert.equal((await uploadVideo(15.01)).status,400);
+    const video=await uploadVideo(15);assert.equal(video.status,201);
     const image=await uploadReference('replacement.jpg','recreation');
-    const post=(refs,target='subject')=>api('/api/video-generations',{user:'recreation',method:'POST',body:{
-      mode:'recreation',prompt:'保留动作，替换主体',replacementTarget:target,referenceIds:refs}});
+    const before=videoWorkflowCalls.length;const h3Before=h3Serial;
+    const post=refs=>api('/api/video-generations',{user:'recreation',method:'POST',body:{mode:'recreation',workflow:'hypit-recreation',prompt:'保留动作，替换主体',replacementTarget:'subject',referenceIds:refs}});
     assert.equal((await post([image.id])).status,400);
-    assert.equal((await post([video.data.reference.id])).status,400);
-    assert.equal((await post([genericLong.data.reference.id,image.id])).status,400);
-    assert.equal((await post([video.data.reference.id,image.id],'invalid')).status,400);
-    const result=await post([video.data.reference.id,image.id],'background');
-    assert.equal(result.status,202,JSON.stringify(result.data));
-    assert.equal(result.data.prompt,'保留动作，替换主体');
-    assert.equal(JSON.stringify(result.data).includes(EXPECTED_GENERATION_CONSTRAINTS),false);
-    const job=generationJobs.get(result.data.taskId);
-    assert.equal(job.input.model,'MiniMax-H3'); assert.equal(job.input.resolution,'768P');
-    assert.equal(job.input.ratio,'9:16'); assert.equal(job.input.duration,5);
-    assert.equal(job.input.content[1].role,'reference_video');
-    assert.equal(job.input.content[2].role,'reference_image');
-    assert.match(job.input.content[1].video_url.url,/signature|sig|token/);
-    assert.match(job.input.content[0].text,/保持原视频主体/);
-    assert.equal((await api('/api/video-generations/'+result.data.taskId,{user:'a'})).status,404);
-    assert.equal((await api('/api/video-generations/'+result.data.taskId,{user:'recreation',method:'DELETE'})).status,409);
-    job.status='succeeded';job.content={url:'https://example.com/recreated.mp4'};
-    const complete=await api('/api/video-generations/'+result.data.taskId,{user:'recreation'});
-    assert.equal(complete.data.status,'SUCCESS');
-    assert.ok(JSON.stringify(complete.data.results).includes('recreated.mp4'));
-    assert.equal((await api('/api/video-generations/'+result.data.taskId,{user:'recreation',method:'DELETE'})).status,200);
-    assert.equal(videoWorkflowCalls.length,before);
-    assert.equal((await api('/api/video-generations/current',{user:'recreation'})).data.generation,null);
-    const reuse=await api(`/api/assets/${encodeURIComponent('reference:'+genericLong.data.reference.id)}/reference`,{
-      user:'recreation',method:'POST',body:{purpose:'recreation'}});
-    assert.equal(reuse.status,400);
-    const config=await api('/api/config'); assert.equal(config.data.videoGeneration.recreation.ready,true);
+    const result=await post([video.data.reference.id]);
+    assert.equal(result.status,503);assert.equal(result.data.errorCode,'HYPIT_NOT_CONFIGURED');
+    assert.equal((await post([video.data.reference.id,image.id])).status,503);
+    assert.equal(videoWorkflowCalls.length,before);assert.equal(h3Serial,h3Before);
+    const config=await api('/api/config');assert.equal(config.data.videoGeneration.recreation.engine,'Hypit');
+    assert.equal(config.data.videoGeneration.recreation.ready,false);
     assert.deepEqual(config.data.videoGeneration.durations,[5,10,15]);
-    const batchRequest={mode:'recreation',prompt:'替换主体，保留动作',replacementTarget:'subject',count:2,
-      referenceIds:[video.data.reference.id,image.id],parameters:{duration:10,resolution:'768p竖'}};
-    const batch=await api('/api/video-generations',{user:'recreation',method:'POST',body:batchRequest});
-    assert.equal(batch.status,202,JSON.stringify(batch.data));
-    const firstId=[...generationJobs.keys()].filter(id=>id.startsWith('h3_video_')).at(-1);
-    assert.ok(firstId);assert.equal(batch.data.variants[1].status,'PENDING');
-    const firstJob=generationJobs.get(firstId);
-    assert.equal(firstJob.input.duration,10);assert.match(firstJob.input.content[0].text,/保持原视频背景/);
-    assert.equal(Object.hasOwn(firstJob.input,'seed'),false);
-    firstJob.status='succeeded';firstJob.content={url:'https://example.com/variant-one.mp4'};
-    const next=await api('/api/video-generations/'+batch.data.taskId,{user:'recreation'});
-    const secondId=[...generationJobs.keys()].filter(id=>id.startsWith('h3_video_')).at(-1);assert.notEqual(secondId,firstId);
-    const secondJob=generationJobs.get(secondId);
-    assert.notEqual(firstJob.input.content[0].text,secondJob.input.content[0].text);
-    assert.match(secondJob.input.content[0].text,/严格保留原视频的动作/);
-    secondJob.status='failed';secondJob.error={message:'reference validation failed'};
-    const partial=await api('/api/video-generations/'+batch.data.taskId,{user:'recreation'});
-    assert.equal(partial.data.status,'PARTIAL');
-    assert.equal((await api('/api/video-generations/'+batch.data.taskId,{user:'recreation',method:'DELETE'})).status,200);
-
+    assert.equal((await api('/api/video-generations/current',{user:'recreation'})).data.generation,null);
   });
   await t.test('a variant batch submits sequentially, survives restart and retains independent results',async()=>{
     const image=await uploadReference('batch-subject.jpg','variants');

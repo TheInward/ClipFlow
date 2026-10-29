@@ -3578,7 +3578,9 @@ const ROUTES = {
    */
   'POST /api/tasks/from-url': async (req, res) => {
     const body = await readJsonBody(req);
-    const raw = extractVideoLinks(body.url)[0];
+    const links = extractVideoLinks(body.url);
+    if (links.length > 1) return sendError(res,400,'每次只能添加一个视频，请分别粘贴分享内容后添加');
+    const raw = links[0];
     if (!raw) return sendError(res, 400, '请粘贴视频链接或抖音分享文案');
     const me = currentUser(req);
     if (!me) return sendError(res, 401, '请重新登录');
@@ -3607,15 +3609,20 @@ const ROUTES = {
   /** 分享文案和直链共用批次列表；抖音选择中等码率并保存到本地。 */
   'POST /api/batches/from-urls': async (req, res) => {
     const body = await readJsonBody(req);
-    const urls = extractVideoLinks(body.urls);
+    const urls = extractVideoLinks(body.content ?? body.urls);
+    if (urls.length > 1) return sendError(res,400,'每次只能添加一个视频，请分别粘贴分享内容后添加');
     if (!urls.length) return sendError(res, 400, '请粘贴视频链接或抖音分享文案');
     if (urls.length > MAX_BATCH_SIZE) return sendError(res, 400, `一批最多 ${MAX_BATCH_SIZE} 个链接`);
     const dg = diskGuard();
     if (!dg.ok) return sendError(res, 507, diskLowMessage(dg.free));
     const me = currentUser(req);
     if (!me) return sendError(res, 401, '请重新登录');
+    const existing = body.batchId ? db.batches[String(body.batchId)] : null;
+    if (body.batchId && (!existing || existing.userId !== me.id)) return sendError(res,404,'批次不存在或不属于当前账号');
+    if (existing && (!existing.linkSource && !existing.items.every(item=>{const task=db.tasks[item.taskId];return task?.sourceUrl || task?.sourcePlatform === 'douyin';}))) return sendError(res,400,'只能向去水印链接列表添加');
+    if (existing && existing.items.length >= MAX_BATCH_SIZE) return sendError(res,400,`列表最多 ${MAX_BATCH_SIZE} 个视频，请先移除部分视频`);
     const eff = applyErasePreset({ preset: 'fullscreen' });
-    const batch = { id: id('batch'), createdAt: new Date().toISOString(), operation: DEFAULT_OPERATION,
+    const batch = existing || { linkSource:true, id: id('batch'), createdAt: new Date().toISOString(), operation: DEFAULT_OPERATION,
       erasePreset: eff.preset, enhance: false, resolution: null, userId: me.id, taskIds: [], items: [] };
     const skipped = [];
     for (const raw of urls) {
@@ -3639,11 +3646,15 @@ const ROUTES = {
           task.etaSeconds = task.estimatedSeconds;
         }
         task.erasePreset = eff.preset;
+        if (existing && (db.batches[existing.id] !== existing || existing.items.length >= MAX_BATCH_SIZE)) {
+          if (!Object.values(db.batches).some(b=>b.items?.some(i=>i.taskId===task.id))) delete db.tasks[task.id];
+          throw new Error('列表已被删除或已满，请刷新后重试');
+        }
         batch.items.push({ fileId, taskId: task.id, shared: false, reused: false, attached: false, sharedWithFileId: null });
         batch.taskIds.push(task.id);
       } catch (err) { skipped.push({ url: raw, reason: err.message }); }
     }
-    if (!batch.items.length) return sendError(res, 422, skipped[0]?.reason || '没有可处理的链接', { skipped });
+    if (skipped.length) return sendError(res, 422, skipped[0]?.reason || '没有可处理的链接', { skipped });
     db.batches[batch.id] = batch; saveDb();
     sendJson(res, 202, { ...serializeBatch(batch), skipped, poll: `/api/batches/${batch.id}` });
   },

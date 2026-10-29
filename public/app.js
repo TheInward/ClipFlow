@@ -1797,20 +1797,22 @@ async function setTab(tab) {
 }
 
 /* ------------------------------- 链接去水印 -------------------------------
- * 与「去字幕 / 超清」共用批次列表：一次粘贴多条直链 → 建成一个链接批次 →
+ * 与「去字幕 / 超清」共用批次列表：每次粘贴一份完整分享文案 → 追加到同一个链接批次 →
  * 用「批量开始 / 批量取消 / 批量删除」统一操作，也可以在行内单独控制。
  */
 async function addLinkBatch() {
+  const requestEpoch = workspaceEpoch;
   const raw = String(el.linkInputs?.value || '');
-  const urls = raw.match(/https?:\/\/[^\s<>\"']+/gi) || [];
+  const hasUrl = /https?:\/\//i.test(raw);
   if (el.linkNotice) el.linkNotice.hidden = true;
-  if (!urls.length) {
+  if (!hasUrl) {
     if (el.linkNotice) { el.linkNotice.textContent = '请粘贴视频链接或抖音分享文案'; el.linkNotice.hidden = false; }
     return;
   }
   if (!markBusy(el.linkAdd, '正在解析…')) return;
   try {
-    const res = await jsonApi('/api/batches/from-urls', { method: 'POST', timeoutMs: 900000, body: JSON.stringify({ urls }) });
+    const res = await jsonApi('/api/batches/from-urls', { method: 'POST', timeoutMs: 900000, body: JSON.stringify({ content:raw, batchId:state.tabBatch.link || null }) });
+    if (requestEpoch !== workspaceEpoch) return;
     el.linkInputs.value = '';
     state.tabBatch.link = res.batch.id;
     state.batchId = res.batch.id;
@@ -1828,8 +1830,9 @@ async function addLinkBatch() {
     } else {
       setNotice('');
     }
-    toast(`已添加 ${res.items.length} 个链接，可点「批量开始」`);
+    toast('已添加 1 个视频，可继续添加或点击「批量开始」');
   } catch (err) {
+    if (requestEpoch !== workspaceEpoch) return;
     if (el.linkNotice) { el.linkNotice.textContent = `添加失败：${err.message}`; el.linkNotice.hidden = false; }
   } finally {
     clearBusy(el.linkAdd);

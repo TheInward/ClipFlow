@@ -26,7 +26,7 @@ async function freePort() {
 // Test-only executable substitutes deterministic media metadata for ffprobe.
 async function mockProbe(dir) {
   const file = path.join(dir, 'ffprobe');
-  await fs.writeFile(file, `#!${process.execPath}\nconst fs = require('node:fs');\nconst duration = Number(fs.readFileSync(process.argv.at(-1), 'utf8'));\nconsole.log(JSON.stringify({streams: [{codec_type:'video',duration}],format:{duration}}));\n`, { mode: 0o755 });
+  await fs.writeFile(file, `#!${process.execPath}\nconst fs = require('node:fs');\nconst input = process.argv.at(-1); const duration = input.startsWith('https://8.8.8.8/') ? 5 : Number(fs.readFileSync(input, 'utf8'));\nconsole.log(JSON.stringify({streams: [{codec_type:'video',duration}],format:{duration}}));\n`, { mode: 0o755 });
   await fs.writeFile(path.join(dir, 'ffmpeg'), `#!${process.execPath}\nconst fs = require('node:fs');\nfs.writeFileSync(process.argv.at(-1), Buffer.alloc(2048));\n`, { mode: 0o755 });
   return file;
 }
@@ -183,6 +183,22 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     const maxAge = Number(/Max-Age=(\d+)/.exec(r.headers.get('set-cookie'))?.[1]);
     assert.ok(maxAge >= 3540 && maxAge <= 3600);
     assert.ok(Date.parse(r.data.expiresAt)>Date.now()+59*60000);
+  });
+  await t.test('one complete share per addition appends to the same owner batch',async()=>{
+    const first=await api('/api/batches/from-urls',{method:'POST',body:{content:'产品标题 #厨房好物\nhttps://8.8.8.8/first.mp4\n复制此链接查看视频'}});
+    assert.equal(first.status,202,JSON.stringify(first.data));assert.equal(first.data.items.length,1);
+    const batchId=first.data.batch.id;const taskId=first.data.items[0].taskId;
+    const multiple=await api('/api/batches/from-urls',{method:'POST',body:{content:'https://8.8.8.8/a.mp4 https://8.8.8.8/b.mp4',batchId}});
+    assert.equal(multiple.status,400);assert.match(multiple.data.error,/每次只能添加一个/);
+    assert.equal((await api('/api/tasks/from-url',{method:'POST',body:{url:'https://8.8.8.8/a.mp4 https://8.8.8.8/b.mp4'}})).status,400);
+    const foreign=await api('/api/batches/from-urls',{user:'b',method:'POST',body:{content:'https://8.8.8.8/second.mp4',batchId}});
+    assert.equal(foreign.status,404);
+    const second=await api('/api/batches/from-urls',{method:'POST',body:{content:'另一个产品\n#话题 https://8.8.8.8/second.mp4 复制查看',batchId}});
+    assert.equal(second.status,202,JSON.stringify(second.data));assert.equal(second.data.batch.id,batchId);
+    assert.equal(second.data.items.length,2);assert.equal(second.data.items[0].taskId,taskId);
+    const bad=await api('/api/batches/from-urls',{method:'POST',body:{content:'https://8.8.8.8/unsupported.html',batchId}});
+    assert.equal(bad.status,422);
+    assert.equal((await api('/api/batches/'+batchId)).data.items.length,2);
   });
   await t.test('video generation maps text, multi-image and keyframe modes to exact AutoDL workflows', async () => {
     const config = await api('/api/config');

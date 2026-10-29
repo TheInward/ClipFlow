@@ -2284,7 +2284,10 @@ async function autodlRequest(pathname, { method = 'GET', body, h3 = false } = {}
     let message = upstreamMessage;
     let errorCode = 'PROVIDER_REQUEST_FAILED';
     let retryable = response.status >= 500;
-    if (/insufficient(?: account)? balance|insufficient_balance/i.test(upstreamMessage)) {
+    if (/restricted by our safety guidelines|content.*(?:moderation|safety)|sensitive content/i.test(upstreamMessage)) {
+      message = '服务商未通过本次内容审核，未说明具体是哪项描述或参考素材触发。请检查描述和素材，或联系服务商核查。';
+      errorCode = 'PROVIDER_CONTENT_REJECTED'; retryable = false;
+    } else if (/insufficient(?: account)? balance|insufficient_balance/i.test(upstreamMessage)) {
       message = `云端视频生成服务余额不足，${taskStateMessage}请联系管理员充值服务商账户后重试。`;
       errorCode = 'PROVIDER_BALANCE_INSUFFICIENT';
       retryable = false;
@@ -2342,7 +2345,9 @@ function videoGenerationForUser(userId, activeOnly = false) {
 function serializeVideoGeneration(item) {
   if (!item) return null;
   if (item.isBatch) return serializeVideoBatch(item);
-  const elapsed = Math.max(0, Math.floor((Date.now() - Date.parse(item.createdAt || Date.now())) / 1000));
+  const terminal = VIDEO_GENERATION_TERMINAL.has(item.status);
+  const finishedAt = terminal ? item.finishedAt || item.updatedAt || item.createdAt : null;
+  const elapsed = Math.max(0, Math.floor(((terminal ? Date.parse(finishedAt) : Date.now()) - Date.parse(item.createdAt || Date.now())) / 1000)) || 0;
   let estimatedProgress = 0;
   if (item.status === 'QUEUED' || item.status === 'SUBMITTING') estimatedProgress = Math.min(18, 5 + Math.floor(elapsed / 8));
   else if (item.status === 'RUNNING') estimatedProgress = Math.min(94, 22 + Math.floor(elapsed / 3));
@@ -2357,7 +2362,8 @@ function serializeVideoGeneration(item) {
     parameters: item.parameters,
     createdAt: item.createdAt,
     startedAt: item.startedAt || null,
-    duration: item.duration ?? null,
+    finishedAt,
+    duration: terminal ? elapsed : item.duration ?? null,
     results: (() => {
       return [...new Set(resultVideoUrls(item.results))].flatMap((url, index) => {
         const assetId = `generation:${item.taskId}:${index}`;
@@ -2420,6 +2426,7 @@ async function fetchVideoGenerationStatus(item) {
     item.failureStage = 'generation';
   }
   item.updatedAt = new Date().toISOString();
+  if (VIDEO_GENERATION_TERMINAL.has(item.status)) item.finishedAt ||= item.updatedAt;
   if (item.status === 'SUCCESS') registerGenerationAssets(item);
   if (before !== JSON.stringify([item.status, item.duration, item.startedAt, item.results])) saveDb();
   return item;

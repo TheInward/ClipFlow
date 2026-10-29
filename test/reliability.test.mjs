@@ -73,6 +73,7 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
       const input = JSON.parse(raw);
       assert.ok(input.prompt.endsWith(EXPECTED_GENERATION_CONSTRAINTS));
       videoSubmissionAttempts.push(input);
+      if (input.prompt.startsWith('force safety refusal')) { res.statusCode=400; return json({error:{message:'Your input contains content restricted by our safety guidelines.'}}); }
       if (input.prompt.startsWith('force submission failure')) {
         res.statusCode = 402;
         return json({ message:'Insufficient account balance' });
@@ -119,7 +120,7 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     prompt:'保留在资产中的提示词', results:[], createdAt:new Date().toISOString() },
     older_success: { taskId:'older_success', userId:'poor', status:'SUCCESS', prompt:'older', results:[],
       createdAt:'2020-01-01T00:00:00Z', updatedAt:'2099-01-01T00:00:00Z' },
-    newest_failed: { taskId:'newest_failed', userId:'poor', status:'FAILED', prompt:'failed', results:[], createdAt:new Date().toISOString() } };
+    newest_failed: { taskId:'newest_failed', userId:'poor', status:'FAILED', prompt:'failed', results:[], createdAt:'2026-01-01T00:00:00Z',updatedAt:'2026-01-01T00:00:05Z' } };
   seed.assets = { 'generation:video_finished:0': { id:'generation:video_finished:0', userId:'a',
     name:'saved-video.mp4', kind:'video', ext:'.mp4', mime:'video/mp4', size:2048,
     source:'generation', state:'ready', storedPath:'assets/saved-video.mp4', createdAt:new Date().toISOString() } };
@@ -289,6 +290,8 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
   await t.test('failed tasks can be dismissed and the current panel never falls back to older tasks', async () => {
     const current = await api('/api/video-generations/current',{user:'poor'});
     assert.equal(current.data.generation.taskId,'newest_failed');
+    assert.equal(current.data.generation.duration,5);
+    assert.equal(current.data.generation.finishedAt,'2026-01-01T00:00:05Z');
     assert.equal((await api('/api/video-generations/newest_failed',{user:'poor',method:'DELETE'})).status,200);
     assert.equal((await api('/api/video-generations/current',{user:'poor'})).data.generation,null);
     const rejected = await api('/api/video-generations',{user:'poor',method:'POST',body:{
@@ -303,6 +306,10 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     assert.equal((await api(`/api/video-generations/${failure.taskId}`,{user:'poor',method:'DELETE'})).status,200);
     assert.equal((await api('/api/video-generations/current',{user:'poor'})).data.generation,null);
     assert.ok((await api('/api/assets',{user:'poor'})).data.assets.some(asset=>asset.text==='force submission failure'));
+    const refused=await api('/api/video-generations',{user:'poor',method:'POST',body:{mode:'text',prompt:'force safety refusal'}});
+    assert.equal(refused.status,400);assert.equal(refused.data.errorCode,'PROVIDER_CONTENT_REJECTED');
+    assert.match(refused.data.error,/内容审核/);assert.match(refused.data.error,/未说明具体/);
+    assert.equal(refused.data.generation.failureStage,'submission');assert.equal(refused.data.generation.duration,0);
   });
   await t.test('asset batch deletion and clear-all are scoped to the owner and retain active references',async()=>{
     const first=await uploadReference('bulk-one.jpg','bulk');
@@ -726,6 +733,7 @@ test('a late generation poll cannot replace the current preview', async () => {
   const rendered = [];
   const context = vm.createContext({ generationMonitorToken:0,
     ACTIVE_GENERATION_STATES:new Set(['RUNNING','QUEUED']),
+    updateCreationWorkspace:()=>{},syncGenerationMode:()=>{},
     setGenerationLocked:()=>{}, renderGenerationPreview:(generation)=>rendered.push(generation.taskId),
     setTimeout:(callback)=>callback(), jsonApi:()=>new Promise(resolve=>{resolvePoll=resolve;}),
     generationStageDetail:{}, toast:()=>{}, generationStatusText:()=>'',
@@ -767,7 +775,7 @@ test('account reset clears recent assets and invalidates the cached task renderi
     state:{items:[upload],downloading:new Set(),selected:new Set()},assetRefreshTimer:null,taskPollTimer:null,
     generationMonitorToken:0,generationBusy:false,el:{},homeCmd:{value:'private prompt'},referenceInput:{value:''},
     document:{getElementById:()=>null,querySelector:(selector)=>({querySelectorAll:()=>[],replaceChildren:()=>cleared.push(selector)})},
-    clearTimeout(){},clearInterval(){},stopPolling(){},clearReferenceFiles(){},clearGenerationPreview(){},
+    clearTimeout(){},clearInterval(){},stopPolling(){},clearReferenceFiles(){},clearGenerationPreview(){},updateCreationWorkspace(){},
   });
   vm.runInContext(source.slice(start,end),context);
   context.resetWorkspace();
@@ -859,4 +867,24 @@ test('watermark task switcher keeps one panel and does not restart it on other t
   assert.equal(list.children.filter(n=>n.className==='panel').length,1);
   context.renderWatermarkTasks(rows.slice(1));assert.equal(state.openKey,'two');assert.equal(builds,3);
   context.renderWatermarkTasks([]);assert.equal(state.openKey,null);assert.equal(list.children.filter(n=>n.className==='panel').length,0);
+});
+
+test('legacy safety errors are translated without guessing which input caused the rejection',async()=>{
+  const source=await fs.readFile('public/app.js','utf8');
+  const code=source.slice(source.indexOf('function generationStatusText('),source.indexOf('function renderGenerationPreview('));
+  const context=vm.createContext({currentGenerationMode:()=> 'recreation'});vm.runInContext(code,context);
+  assert.equal(context.generationStatusText('FAILED'),'视频复刻失败');
+  const message=context.generationFailureMessage({error:'Your input contains content restricted by our safety guidelines.',failureStage:'submission'});
+  assert.match(message,/内容审核/);assert.match(message,/未说明具体/);assert.doesNotMatch(message,/政治|违法/);
+});
+
+test('a completed recreation cannot appear in the ordinary generation workspace',async()=>{
+  const source=await fs.readFile('public/app.js','utf8');
+  const code=source.slice(source.indexOf('function renderGenerationPreview('),source.indexOf('async function monitorGeneration('));
+  let paused=false;
+  const context=vm.createContext({generationPreview:{hidden:false},recreationWorkspace:false,
+    generationVideo:{pause(){paused=true;}},document:{getElementById:()=>null}});
+  vm.runInContext(code,context);
+  context.renderGenerationPreview({taskId:'old-recreation',mode:'recreation',status:'FAILED'});
+  assert.equal(context.generationPreview.hidden,true);assert.equal(paused,true);
 });

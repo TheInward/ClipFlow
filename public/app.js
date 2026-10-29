@@ -309,6 +309,7 @@ function resetWorkspace() {
   clearReferenceFiles();
   generationMonitorToken += 1;
   generationBusy = false;
+  updateCreationWorkspace(false);
   clearGenerationPreview();
   for (const selector of ['#assetGrid', '#taskList', '#list', '#homeAssets', '#toolsRecent', '#homeRecent', '#toolRecent']) {
     const node = document.querySelector(selector);
@@ -2130,7 +2131,7 @@ async function addAssetToCreation(asset) {
       homeCmd.dispatchEvent(new Event('input'));
     } else {
       const ref = data.reference;
-      if (ref.kind === 'video') { generationModeSelect.value = 'recreation'; syncGenerationMode(); }
+      if (ref.kind === 'video') { updateCreationWorkspace(true); syncGenerationMode(); }
       else if (currentGenerationMode() === 'text') { generationModeSelect.value = 'multi_image'; syncGenerationMode(); }
       referenceFiles.push({ id: nextReferenceId(), referenceId: ref.id, kind: ref.kind, durationSec:ref.durationSec,
         file: { name: ref.name, size: ref.size, type: ref.mime }, url: ref.localUrl });
@@ -2311,18 +2312,25 @@ function currentGenerationMode() {
   return recreationWorkspace ? 'recreation' : (generationModeSelect?.value || 'text');
 }
 
+function updateCreationWorkspace(next) {
+  recreationWorkspace=next;
+  document.querySelectorAll('[data-creation-workspace]').forEach(tab=>{
+    const selected=(tab.dataset.creationWorkspace==='recreation')===next;
+    tab.classList.toggle('is-active',selected);tab.setAttribute('aria-pressed',String(selected));
+  });
+  document.getElementById('creationWorkspace')?.classList.toggle('is-recreation',next);
+  const modeControl=generationModeSelect?.closest('.composer-select');if(modeControl)modeControl.hidden=next;
+}
+
 document.querySelectorAll('[data-creation-workspace]').forEach(button=>button.addEventListener('click',()=>{
   const next=button.dataset.creationWorkspace==='recreation';
   if (next===recreationWorkspace) return;
   if (generationBusy) { toast('当前任务完成后再切换创作方式'); return; }
-  clearReferenceFiles();recreationWorkspace=next;
-  document.querySelectorAll('[data-creation-workspace]').forEach(tab=>tab.classList.toggle('is-active',tab===button));
-  document.getElementById('creationWorkspace')?.classList.toggle('is-recreation',next);
-  const modeControl=generationModeSelect?.closest('.composer-select');if(modeControl)modeControl.hidden=next;
-  const target=document.getElementById('recreationTargetControl');if(target)target.hidden=!next;
-  const help=document.getElementById('recreationHelp');if(help)help.hidden=!next;
-  const batchHint=document.getElementById('generationBatchHint');if(batchHint&&next){batchHint.hidden=false;batchHint.textContent='上传参考视频与替换图片，保留原视频动作进行复刻。';}else if(batchHint)batchHint.hidden=true;
-  syncGenerationMode();
+  clearReferenceFiles();updateCreationWorkspace(next);
+  generationVideo?.pause();
+  if (generationPreview) generationPreview.hidden=true;
+  syncGenerationMode();syncGenerationBatchHint();
+  if (currentHomeGeneration && (currentHomeGeneration.mode==='recreation')===next) renderGenerationPreview(currentHomeGeneration);
 }));
 
 function clearReferenceFiles() {
@@ -2509,11 +2517,12 @@ function setGenerationLocked(locked) {
 }
 
 function generationStatusText(status) {
-  return ({
+  const text = ({
     SUBMITTING: '正在提交', QUEUED: '等待云端资源', RUNNING: '正在生成视频',
     SUCCESS: '视频生成完成', PARTIAL:'部分视频生成完成', FAILED: '视频生成失败', ERROR: '视频生成失败',
     CANCELED: '任务已取消', CANCELLED: '任务已取消',
   })[status] || '正在处理';
+  return currentGenerationMode()==='recreation' ? text.replaceAll('视频生成','视频复刻').replace('正在生成视频','正在复刻视频') : text;
 }
 
 function generationFailureMessage(generation) {
@@ -2528,6 +2537,9 @@ function generationFailureMessage(generation) {
   if (code === 'PROVIDER_RATE_LIMITED' || /rate limit|too many requests/i.test(raw)) {
     return '云端视频生成服务当前请求过多，任务未创建。请稍后再试。';
   }
+  if (code === 'PROVIDER_CONTENT_REJECTED' || /restricted by our safety guidelines|sensitive content/i.test(raw)) {
+    return '服务商未通过本次内容审核，未说明具体是哪项描述或参考素材触发。请检查描述和素材，或联系服务商核查。';
+  }
   if (raw) return raw;
   return generation?.failureStage === 'submission'
     ? '生成任务未能提交到云端，请稍后重试；若持续失败，请联系管理员。'
@@ -2537,6 +2549,11 @@ function generationFailureMessage(generation) {
 function renderGenerationPreview(generation) {
   if (!generationPreview || !generation) return;
   currentHomeGeneration = generation;
+  if ((generation.mode==='recreation') !== recreationWorkspace) {
+    generationVideo?.pause();generationPreview.hidden=true;
+    const empty=document.getElementById('recreationShowcase');if(empty)empty.hidden=!recreationWorkspace;
+    return;
+  }
   const status = String(generation.status || 'QUEUED').toUpperCase();
   const active = ACTIVE_GENERATION_STATES.has(status);
   const deleteButton = document.getElementById('generationDelete');
@@ -2574,7 +2591,8 @@ function renderGenerationPreview(generation) {
   }
   if (active && document.getElementById('videoCount')) document.getElementById('videoCount').value=String(generation.count || 1);
   const createdAt = Date.parse(generation.createdAt || '') || Date.now();
-  const elapsed = generation.duration ?? Math.max(0, Math.floor((Date.now() - createdAt) / 1000));
+  const endedAt=Date.parse(generation.finishedAt || generation.updatedAt || generation.createdAt || '') || createdAt;
+  const elapsed = generation.duration ?? Math.max(0, Math.floor(((active ? Date.now() : endedAt) - createdAt) / 1000));
   const resolution = generation.parameters?.resolution || '—';
   const duration = generation.parameters?.duration ? `${generation.parameters.duration} 秒` : '';
 
@@ -2591,7 +2609,10 @@ function renderGenerationPreview(generation) {
   const stageTitle = failed && generation.failureStage === 'submission' ? '任务提交失败' : generationStatusText(status);
   if (generationProgressTitle) generationProgressTitle.textContent = stageTitle;
   if (generationProgressSpec) generationProgressSpec.textContent = [resolution, duration, generation.isBatch ? `${generation.count} 条` : ''].filter(Boolean).join(' · ');
-  if (generationElapsed) generationElapsed.textContent = `已耗时 ${Math.max(0, Math.round(Number(elapsed) || 0))} 秒`;
+  if (generationElapsed) generationElapsed.textContent = failed && generation.failureStage==='submission'
+    ? '未进入生成阶段' : `${active ? '已耗时' : '任务耗时'} ${Math.max(0, Math.round(Number(elapsed) || 0))} 秒`;
+  const category=generationPreview.querySelector('.generation-progress-head span');
+  if(category)category.textContent=recreationWorkspace ? 'VIDEO RECREATION' : 'VIDEO GENERATION';
   if (generationStageLabel) generationStageLabel.textContent = stageTitle;
   if (generationStageDetail) {
     generationStageDetail.textContent = failed
@@ -2604,7 +2625,7 @@ function renderGenerationPreview(generation) {
   if (generationProgressNote) {
     generationProgressNote.textContent = failed
       ? (generation.failureStage === 'submission'
-          ? '失败发生在提交阶段，云端任务未创建，因此不显示虚假的 100% 进度。'
+          ? '请求在提交阶段被拒绝，云端未创建生成任务。'
           : '云端任务已终止；失败状态不代表生成进度达到 100%。')
       : status === 'SUCCESS'
         ? '云端任务已完成，并已返回生成结果。'
@@ -2618,7 +2639,7 @@ function renderGenerationPreview(generation) {
       ? `暂时无法更新任务状态：${generation.pollingError}`
       : `已结束 ${generation.completedCount}/${generation.count} 条，成功 ${generation.successCount} 条${generation.failedCount ? `，失败、重复或未提交 ${generation.failedCount} 条` : ''}${generation.error ? `。${generation.error}` : ''}`;
     if (generationProgressNote) generationProgressNote.textContent=active
-      ? '本批次依次生成，每条使用不同的镜头、光线和场景细节；完成的版本可点击预览。每条按服务商规则独立计费。'
+      ? (recreationWorkspace ? '本批次依次复刻，沿用原视频动作与镜头，仅在替换区域变化细节。每条按服务商规则独立计费。' : '本批次依次生成，每条使用不同的镜头、光线和场景细节；完成的版本可点击预览。每条按服务商规则独立计费。')
       : '本批次已结束，成功的视频已保存到资产。失败或重复结果不会自动付费重试。';
   }
   if (resultUrl && generationVideo) {
@@ -2637,10 +2658,12 @@ function renderGenerationPreview(generation) {
   const statusLine = document.getElementById('generationStatus');
   if (statusLine) statusLine.textContent = active
     ? generation.isBatch ? `本批次 ${generation.count} 条正在依次生成 · 完成前不能提交新批次` : `${generationStatusText(status)} · 当前仅支持一个生成任务`
-    : generationStatusText(status);
+    : stageTitle;
 }
 
 async function monitorGeneration(initial) {
+  updateCreationWorkspace(initial.mode==='recreation');
+  syncGenerationMode();
   const token = ++generationMonitorToken;
   let generation = initial;
   setGenerationLocked(ACTIVE_GENERATION_STATES.has(String(generation.status || '').toUpperCase()));
@@ -2696,6 +2719,7 @@ async function restoreHomeGeneration() {
     clearGenerationPreview();
     return;
   }
+  updateCreationWorkspace(data.generation.mode==='recreation');syncGenerationMode();syncGenerationBatchHint();
   if (ACTIVE_GENERATION_STATES.has(String(data.generation.status || '').toUpperCase())) {
     monitorGeneration(data.generation);
   } else {
@@ -2850,7 +2874,7 @@ async function runHomeCommand() {
       errorCode: err.data?.errorCode || '',
       error: err.message,
     });
-    toast(`视频生成失败：${err.message}`);
+    toast(`${currentGenerationMode()==='recreation' ? '视频复刻' : '视频生成'}提交失败，请查看任务详情`);
     setGenerationLocked(false);
   }
 }
@@ -2883,11 +2907,14 @@ function syncPreviewSpec() {
   if (spec) spec.textContent = `${ratio} · ${duration} 秒 · ${resolution.toUpperCase()}`;
 }
 ['videoRatio', 'videoDuration', 'videoResolution'].forEach((id) => document.getElementById(id)?.addEventListener('change', syncPreviewSpec));
-document.getElementById('videoCount')?.addEventListener('change', () => {
-  const count=Number(document.getElementById('videoCount').value);
+function syncGenerationBatchHint() {
   const hint=document.getElementById('generationBatchHint');
-  if (hint) {hint.hidden=count===1;hint.textContent=`将依次生成 ${count} 条独立视频，变化镜头、光线和场景细节；每条分别计费。批次完成前不能删除或再次提交。`;}
-});
+  const count=Number(document.getElementById('videoCount')?.value || 1);
+  if(hint){hint.hidden=count<=1;hint.textContent=currentGenerationMode()==='recreation'
+    ? `本批次共 ${count} 条，依次复刻；保留原视频动作与镜头，仅在替换区域变化细节。`
+    : `本批次共 ${count} 条，依次生成不同镜头、光线和场景细节；每条分别计费。`;}
+}
+document.getElementById('videoCount')?.addEventListener('change',syncGenerationBatchHint);
 
 /* ============================================================================
  * 任务中心

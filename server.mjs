@@ -3656,7 +3656,12 @@ const ROUTES = {
     }
     if (skipped.length) return sendError(res, 422, skipped[0]?.reason || '没有可处理的链接', { skipped });
     db.batches[batch.id] = batch; saveDb();
-    sendJson(res, 202, { ...serializeBatch(batch), skipped, poll: `/api/batches/${batch.id}` });
+    let startError = null;
+    if (body.autoStart === true) {
+      try { await startTask(db.tasks[batch.items.at(-1).taskId], me); }
+      catch (err) { startError = err.message; }
+    }
+    sendJson(res, 202, { ...serializeBatch(batch), skipped, startError, poll: `/api/batches/${batch.id}` });
   },
 
   /** 把一个批次里「已完成」的产物打成一个 zip 流式下载（不落盘，边下边打） */

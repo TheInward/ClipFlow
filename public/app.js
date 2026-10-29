@@ -1797,7 +1797,7 @@ async function setTab(tab) {
 }
 
 /* ------------------------------- 链接去水印 -------------------------------
- * 与「去字幕 / 超清」共用批次列表：每次粘贴一份完整分享文案 → 追加到同一个链接批次 →
+ * 与「去字幕 / 超清」共用批次列表：每次粘贴一份完整分享文案 → 自动开始并追加到同一个链接批次 →
  * 用「批量开始 / 批量取消 / 批量删除」统一操作，也可以在行内单独控制。
  */
 async function addLinkBatch() {
@@ -1809,16 +1809,17 @@ async function addLinkBatch() {
     if (el.linkNotice) { el.linkNotice.textContent = '请粘贴视频链接或抖音分享文案'; el.linkNotice.hidden = false; }
     return;
   }
-  if (!markBusy(el.linkAdd, '正在解析…')) return;
+  if (!markBusy(el.linkAdd, '正在提交…')) return;
+  el.linkInputs.value = '';
+  el.linkInputs.focus();
   try {
-    const res = await jsonApi('/api/batches/from-urls', { method: 'POST', timeoutMs: 900000, body: JSON.stringify({ content:raw, batchId:state.tabBatch.link || null }) });
+    const res = await jsonApi('/api/batches/from-urls', { method: 'POST', timeoutMs: 900000, body: JSON.stringify({ content:raw, autoStart:true, batchId:state.tabBatch.link || null }) });
     if (requestEpoch !== workspaceEpoch) return;
-    el.linkInputs.value = '';
     state.tabBatch.link = res.batch.id;
     state.batchId = res.batch.id;
     try { const key = batchStorageKey(); if (key) localStorage.setItem(key, state.batchId); } catch { /* 忽略 */ }
     applyBatch(res);
-    // 新添加的链接默认全部勾选，方便直接点「批量开始」
+    // 新任务自动开始；失败或余额不足时保留在列表中，方便重试。
     const fresh = viewRows().filter((r) => r.status === 'idle');
     fresh.forEach((r) => state.selected.add(r.key));
     render();
@@ -1830,10 +1831,12 @@ async function addLinkBatch() {
     } else {
       setNotice('');
     }
-    toast('已添加 1 个视频，可继续添加或点击「批量开始」');
+    if (res.startError) {
+      if (el.linkNotice) { el.linkNotice.textContent = `未能开始去水印：${res.startError}，任务已保留在列表中`; el.linkNotice.hidden = false; }
+    } else toast('已开始去水印，可以继续粘贴下一条');
   } catch (err) {
     if (requestEpoch !== workspaceEpoch) return;
-    if (el.linkNotice) { el.linkNotice.textContent = `添加失败：${err.message}`; el.linkNotice.hidden = false; }
+    if (el.linkNotice) { el.linkNotice.textContent = `去水印提交失败：${err.message}，请重新粘贴后重试`; el.linkNotice.hidden = false; }
   } finally {
     clearBusy(el.linkAdd);
   }

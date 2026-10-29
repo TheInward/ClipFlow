@@ -7,7 +7,7 @@
 <meta name="description" content="ClipFlow AI 是一站式 AI 视频创作平台，支持文字与参考素材生成视频，并提供字幕处理、画质增强、视频压缩与资产管理。" />
 <meta name="color-scheme" content="light" />
 <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-<link rel="stylesheet" href="/styles.css?v=202610290955" />
+<link rel="stylesheet" href="/styles.css?v=202610290957" />
 </head>
 <body>
 
@@ -191,10 +191,10 @@
           </div>
           <span class="pill">每次添加 1 条</span>
         </div>
-        <textarea id="linkInputs" class="url-input url-area" rows="4" placeholder="粘贴一份完整分享文案，包含标题、话题和视频链接均可。每次添加一个视频，可多次添加后批量处理。"></textarea>
+        <textarea id="linkInputs" class="url-input url-area" rows="4" placeholder="粘贴一份完整分享文案，包含标题、话题和视频链接均可。每次处理一个视频，点击「去水印」后可继续粘贴下一条。"></textarea>
         <div class="url-row">
-          <span class="hint" id="linkHint">每次添加一份分享内容，可多次添加后批量处理。抖音视频默认选择中等码率；视频直链使用全屏模式擦除文字与文字水印。快手等其他平台分享链接暂不支持。</span>
-          <button class="btn btn-primary" id="linkAdd" type="button">添加链接</button>
+          <span class="hint" id="linkHint">每次解析一份分享内容，点击「去水印」立即开始，可连续提交多条。抖音视频默认选择中等码率；视频直链使用全屏模式擦除文字与文字水印。快手等其他平台分享链接暂不支持。</span>
+          <button class="btn btn-primary" id="linkAdd" type="button">去水印</button>
         </div>
         <div class="notice notice-danger" id="linkNotice" hidden></div>
       </section>
@@ -392,7 +392,7 @@
   </div><!-- /shell -->
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/app.js?v=202610290955" type="module"></script>
+  <script src="/app.js?v=202610290957" type="module"></script>
   <div class="admin-mask" id="adminMask" hidden>
     <div class="admin-panel" role="dialog" aria-modal="true" aria-labelledby="adminTitle">
       <div class="admin-head">

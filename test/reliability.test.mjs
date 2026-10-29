@@ -603,6 +603,18 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
     assert.equal(downloaded.status, 200);
     assert.match(downloaded.headers.get('content-type'), /video\/mp4/);
   });
+  await t.test('watermark click starts only the newly appended task and retains insufficient-credit entries',async()=>{
+    const first=await api('/api/batches/from-urls',{method:'POST',body:{content:'https://8.8.8.8/queued.mp4'}});
+    assert.equal(first.status,202);
+    const second=await api('/api/batches/from-urls',{method:'POST',body:{content:'完整分享文案\nhttps://8.8.8.8/start-now.mp4 #产品',batchId:first.data.batch.id,autoStart:true}});
+    assert.equal(second.status,202);assert.equal(second.data.startError,null);assert.equal(second.data.items.length,2);
+    const old=await task(first.data.items[0].taskId);assert.equal(old.status,'pending');assert.ok(!old.chargedCredits);
+    const newId=second.data.items[1].taskId;const started=await task(newId);
+    assert.ok(['pending','processing'].includes(started.status));assert.equal(started.chargedCredits,5);
+    await cancel(newId);
+    const poor=await api('/api/batches/from-urls',{user:'poor',method:'POST',body:{content:'https://8.8.8.8/no-credit.mp4',autoStart:true}});
+    assert.equal(poor.status,202);assert.match(poor.data.startError,/积分/);assert.equal(poor.data.items.length,1);
+  });
 });
 
 test('enhancement response envelopes resolve to string URLs and numeric duration', async()=>{

@@ -18,8 +18,8 @@
   /* 文字 */
   --ink: #0f1115;
   --ink-2: #5b6068;
-  --ink-3: #8b9199;
-  --ink-4: #aeb3ba;
+  --ink-3: #646e7d;
+  --ink-4: #727c8b;
 
   /* 描边（少用） */
   --line: #e7e9ed;
@@ -28,9 +28,9 @@
   /* 强调与语义 */
   --link: #4176e6;
   --link-soft: #eef4ff;
-  --success: #22c55e;
-  --warn: #f59e0b;
-  --danger: #ec1313;
+  --success: #16865c;
+  --warn: #a96308;
+  --danger: #c33939;
 
   /* 圆角 / 阴影 / 字体 */
   --r-lg: 24px;
@@ -1570,7 +1570,7 @@ body{background:var(--canvas)}
  * 工具页统一布局 · 去水印 / 去字幕 / 加字幕 / 画质超清 / 视频压缩
  * ========================================================================== */
 #pageTools{padding-top:18px}
-#pageTools .tabbar{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:0 0 30px;padding:6px;border:1px solid var(--line);border-radius:18px;background:#f5f5f7}
+#pageTools .tabbar{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0 0 30px;padding:6px;border:1px solid var(--line);border-radius:18px;background:#f5f5f7}
 #pageTools .tab{width:100%;min-height:42px;padding:0 14px;border:0!important;border-radius:13px;background:transparent;color:var(--ink-2);font-size:13px;white-space:nowrap}
 #pageTools .tab:hover{background:rgba(255,255,255,.75);color:var(--ink)}
 #pageTools .tab.is-active{background:#fff!important;border-color:transparent!important;color:#111!important;box-shadow:0 2px 8px rgba(10,10,12,.08);font-weight:650}
@@ -1650,3 +1650,28 @@ body{background:var(--canvas)}
 @media(max-width:760px){.creation-workspace.is-recreation{grid-template-columns:1fr}.creation-workspace.is-recreation .creation-composer,.creation-workspace.is-recreation .generation-preview-panel{grid-column:1;grid-row:auto}.creation-workspace.is-recreation .generation-preview-stage{min-height:420px}.creation-workspace-tabs{width:100%}.creation-workspace-tab{flex:1;min-width:0}}
 .creation-workspace.is-recreation .recreation-showcase{grid-column:2;grid-row:1 / span 2;display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:620px;padding:32px;text-align:center;border:1px solid var(--line);border-radius:22px;background:#fff}.creation-workspace.is-recreation .recreation-showcase[hidden]{display:none}.recreation-showcase-art{display:grid;place-items:end start;width:min(100%,680px);height:360px;padding:24px;border-radius:18px;background:linear-gradient(0deg,rgba(0,0,0,.65),transparent 45%),radial-gradient(ellipse at 60% 25%,#c9d8e7,#e6e8ec 52%,#737b84);color:#fff;font-size:16px}.recreation-showcase h2{margin-top:24px;font-size:32px}.recreation-showcase p{margin-top:10px;color:var(--ink-2)}@media(max-width:760px){.creation-workspace.is-recreation .recreation-showcase{grid-column:1;grid-row:auto;min-height:360px}.recreation-showcase-art{height:220px}.recreation-showcase h2{font-size:24px}}
 .creation-workspace.is-recreation .model-select{display:none}.hypit-model-label{font-size:13px;font-weight:600;padding:12px;color:var(--ink)}
+
+/* Commercial workspace: restrained surfaces, readable hierarchy, accessible controls. */
+.creation-hero h1{font-size:clamp(32px,4vw,48px);line-height:1.2;letter-spacing:-.035em}
+.creation-hero>p{max-width:720px;margin:14px auto 0;line-height:1.8}
+.creation-composer,.generation-preview-panel{box-shadow:0 8px 28px -18px rgba(25,40,65,.22)}
+.creation-workspace-tab:focus-visible,button:focus-visible,a:focus-visible,select:focus-visible{outline:2px solid var(--link);outline-offset:3px}
+textarea::placeholder,input::placeholder{color:#697484;opacity:1}
+.generation-progress-card{min-width:0;overflow-wrap:anywhere}
+.creation-workspace.is-recreation{grid-template-columns:minmax(300px,.38fr) minmax(0,.62fr)}
+.creation-workspace.is-recreation .generation-preview-stage{min-height:380px;max-height:720px}
+@media(min-width:761px) and (max-width:1200px){
+  .creation-workspace.is-recreation .generation-preview-panel{grid-template-columns:1fr}
+  .creation-workspace.is-recreation .generation-preview-stage{min-height:360px}
+}
+@media(max-width:760px){
+  .creation-workspace.is-recreation{grid-template-columns:1fr}
+  .creation-workspace.is-recreation .generation-preview-panel{grid-template-columns:1fr}
+  .creation-workspace.is-recreation .generation-preview-stage{min-height:320px}
+}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+@media(max-width:760px){
+  #pageHome{padding-top:20px}
+  .creation-workspace.is-recreation .creation-composer{grid-row:1}
+  .creation-workspace.is-recreation .generation-preview-panel,.creation-workspace.is-recreation .recreation-showcase{grid-row:2}
+}

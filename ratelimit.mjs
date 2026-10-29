@@ -7,6 +7,12 @@ let lastSweep = 0;
 
 export function take(key, { rate = 2, burst = 60 } = {}) {
   const now = Date.now();
+  // Sweep on successful traffic too; unique keys must not grow forever.
+  if (now - lastSweep > 60000) {
+    lastSweep = now;
+    for (const [k, v] of buckets) if (now - v.ts > 10 * 60000) buckets.delete(k);
+  }
+  if (!buckets.has(key) && buckets.size >= 20000) return { ok: false, retryAfter: 60 };
   let b = buckets.get(key);
   if (!b) { b = { tokens: burst, ts: now }; buckets.set(key, b); }
   // 按 elapsed 补充令牌
@@ -16,11 +22,6 @@ export function take(key, { rate = 2, burst = 60 } = {}) {
     b.ts = now;
   }
   if (b.tokens < 1) {
-    // 定期清理空闲桶，避免内存增长
-    if (now - lastSweep > 60000) {
-      lastSweep = now;
-      for (const [k, v] of buckets) if (now - v.ts > 10 * 60000) buckets.delete(k);
-    }
     return { ok: false, retryAfter: Math.ceil((1 - b.tokens) / rate) };
   }
   b.tokens -= 1;

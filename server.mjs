@@ -427,7 +427,7 @@ function flushDb() {
     saveWriting = false;
     return console.error('[db] 序列化失败', err.message);
   }
-  fs.writeFile(tmp, payload, (err) => {
+  fs.writeFile(tmp, payload, { mode: 0o600 }, (err) => {
     if (err) {
       saveWriting = false;
       console.error('[db] 写入失败', err.message);
@@ -446,7 +446,9 @@ function saveDbSync() {
   clearTimeout(saveTimer);
   savePending = false;
   try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+    const temp = `${DB_FILE}.shutdown.tmp`;
+    fs.writeFileSync(temp, JSON.stringify(db, null, 2), { mode: 0o600 });
+    fs.renameSync(temp, DB_FILE);
     return true;
   } catch (err) {
     console.error('[db] 写入失败', err.message);
@@ -498,7 +500,6 @@ function sendJson(res, status, body) {
     'content-type': 'application/json; charset=utf-8',
     'content-length': buf.length,
     'cache-control': 'no-store',
-    'access-control-allow-origin': '*',
   });
   if (res.isHead) return res.end(); // HEAD：只回头，不回 body
   res.end(buf);
@@ -516,7 +517,9 @@ async function readJsonBody(req, limit = 64 * 1024) {
   }
   if (!chunks.length) return {};
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected object');
+    return value;
   } catch {
     throw Object.assign(new Error('请求体不是合法 JSON'), { status: 400 });
   }
@@ -540,8 +543,11 @@ function parseCookies(header) {
   return out;
 }
 
-const isSecureReq = (req) =>
-  Boolean(req.socket?.encrypted) || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+// Only the local reverse proxy may supply forwarding metadata. Nginx appends
+// the actual peer to X-Forwarded-For; the first entry is controlled by clients.
+const localProxy = (req) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress);
+const isSecureReq = (req) => Boolean(req.socket?.encrypted) ||
+  (localProxy(req) && req.headers['x-forwarded-proto'] === 'https');
 
 function setSessionCookie(req, res, sid, maxAgeSec) {
   const bits = [`${SESSION_COOKIE}=${encodeURIComponent(sid)}`, 'Path=/', 'HttpOnly', 'SameSite=Lax'];
@@ -551,8 +557,10 @@ function setSessionCookie(req, res, sid, maxAgeSec) {
   res.setHeader('Set-Cookie', bits.join('; '));
 }
 
-const clientIp = (req) =>
-  String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress || 'unknown';
+const clientIp = (req) => {
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',').at(-1).trim();
+  return localProxy(req) && net.isIP(forwarded) ? forwarded : req.socket?.remoteAddress || 'unknown';
+};
 
 function pruneSessions() {
   const now = Date.now();
@@ -831,7 +839,6 @@ function serveFile(req, res, absPath, { mime, downloadName, cache = 'no-store' }
     'content-type': type,
     'accept-ranges': 'bytes',
     'cache-control': cache,
-    'access-control-allow-origin': '*',
   };
   if (downloadName) {
     headers['content-disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(downloadName)}`;
@@ -2890,6 +2897,13 @@ const ROUTES = {
     if (workflow !== expectedWorkflow) return sendError(res, 400, '生成方式与视频工作流不匹配');
     const parameters = body.parameters && typeof body.parameters === 'object' && !Array.isArray(body.parameters)
       ? { ...body.parameters } : {};
+    // Accept only product controls; provider options and external media URLs are server-owned.
+    if (Object.keys(parameters).some(key => !['resolution', 'duration', 'seed'].includes(key))) {
+      return sendError(res, 400, '包含不支持的视频生成参数');
+    }
+    if (parameters.seed !== undefined && (!Number.isSafeInteger(parameters.seed) || parameters.seed < 0 || parameters.seed > 2147483647)) {
+      return sendError(res, 400, '随机种子必须为 0–2147483647 的整数');
+    }
     parameters.resolution ??= '768p竖';
     parameters.duration ??= 5;
     if (mode === 'recreation') {
@@ -4063,14 +4077,25 @@ const server = http.createServer(async (req, res) => {
       }
     });
 
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204, {
-        'access-control-allow-origin': '*',
-        'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
-        'access-control-allow-headers': 'content-type,x-file-name,x-file-md5,range',
-        'access-control-max-age': '86400',
-      });
-      return res.end();
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'same-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https: http:; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+    const expectedOrigin = `${isSecureReq(req) ? 'https' : 'http'}://${req.headers.host}`;
+    const mutation = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
+    if ((mutation || req.method === 'OPTIONS') &&
+        ((req.headers.origin && req.headers.origin !== expectedOrigin) || req.headers['sec-fetch-site'] === 'cross-site')) {
+      return sendError(res, 403, '不允许跨站操作，请从本站页面重试');
+    }
+    if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+    // Public authentication routes also need limits before password hashing and captcha allocation.
+    if (url.pathname.startsWith('/api/auth/')) {
+      const budget = takeToken(`auth:${clientIp(req)}`, { rate: 1, burst: 30 });
+      if (!budget.ok) {
+        res.setHeader('Retry-After', String(budget.retryAfter));
+        return sendError(res, 429, '操作过于频繁，请稍后重试', { retryAfter: budget.retryAfter });
+      }
     }
 
     // 静态资源
@@ -4090,6 +4115,7 @@ const server = http.createServer(async (req, res) => {
     // 限流：全局并发 + 每用户 + 每 IP（白名单/管理员豁免）
     const meUser = currentUser(req);
     const isPrivileged = !!meUser && (meUser.role === 'admin' || meUser.whitelisted === true);
+    if (!authless && meUser?.suspended) return sendError(res, 403, '账号已被暂停，请联系管理员');
     if (!authless && !isPrivileged) {
       const ip = clientIp(req);
       const limit = (key, opt) => {

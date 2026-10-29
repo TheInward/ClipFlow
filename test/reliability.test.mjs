@@ -169,6 +169,27 @@ test('real HTTP routes: billing, ownership, queue cancellation, enhancement and 
   const cancel = async(id, user='a')=>api(`/api/tasks/${id}`,{method:'DELETE',user});
   const task = async(id,user='a')=>(await api(`/api/tasks/${id}`,{user})).data.task;
 
+  await t.test('cross-site writes, malformed JSON shapes and provider parameter injection are rejected', async () => {
+    const cross = await api('/api/assets/delete', {method:'POST',body:{all:true},headers:{Origin:'https://attacker.example'}});
+    assert.equal(cross.status,403);
+    assert.equal((await api('/api/auth/logout',{method:'POST',headers:{'Sec-Fetch-Site':'cross-site'}})).status,403);
+    assert.equal((await api('/api/auth/register',{method:'POST',raw:'null'})).status,400);
+    assert.equal((await api('/api/auth/register',{method:'POST',raw:'[]'})).status,400);
+    const same = await api('/api/video-generations',{method:'POST',headers:{Origin:base},body:{mode:'text',prompt:'safe',parameters:{callback_url:'http://127.0.0.1/private'}}});
+    assert.equal(same.status,400);assert.match(same.data.error,/不支持/);
+    assert.equal((await api('/api/video-generations',{method:'POST',body:{mode:'text',prompt:'safe',parameters:{seed:-1}}})).status,400);
+    const page = await fetch(base+'/');
+    assert.equal(page.headers.get('x-content-type-options'),'nosniff');
+    assert.equal(page.headers.get('x-frame-options'),'DENY');
+    assert.match(page.headers.get('content-security-policy'),/script-src 'self'/);
+    assert.equal(page.headers.get('access-control-allow-origin'),null);
+    assert.equal((await api('/api/auth/session')).data.authenticated,true);
+  });
+  await t.test('spoofing the first forwarded IP cannot bypass public authentication rate limits', async () => {
+    let response;
+    for(let i=0;i<35;i++) response=await api('/api/auth/captcha',{headers:{'X-Forwarded-For':`198.51.100.${i}, 203.0.113.27`}});
+    assert.equal(response.status,429);assert.ok(Number(response.headers.get('retry-after'))>0);
+  });
   await t.test('background polling completes persisted generations without a browser and rejects foreign current pointers',async()=>{
     await until(async()=>JSON.parse(await fs.readFile(path.join(dir,'db.json'),'utf8')).videoGenerations.video_background.status==='SUCCESS');
     assert.equal((await api('/api/video-generations/current',{user:'isolated'})).data.generation,null);

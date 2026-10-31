@@ -7,6 +7,7 @@
  *   ⑤ 批次级：勾选任务后用「批量开始 / 批量取消」（两个独立按钮，不随单任务状态改名）
  * ========================================================================== */
 
+import { setupEditing } from './editing.js';
 const $ = (sel) => document.querySelector(sel);
 
 const el = {
@@ -264,6 +265,7 @@ async function bootstrap() {
 async function init() {
   activateWorkspace(state.session?.user?.id || null);
   state.config = await jsonApi('/api/config');
+  syncImageGenerationUI();
   el.buildTag.textContent = state.config.build || '';
   const exts = (state.config.allowedExtensions || []).map((e) => e.slice(1).toUpperCase()).join(' / ');
   el.dropHint.textContent = `支持 ${exts}，单个最大 ${fmtBytes(state.config.maxUploadBytes)}，一批最多 ${state.config.maxBatchSize || 10} 个`;
@@ -289,6 +291,7 @@ function activateWorkspace(userId) {
 
 function resetWorkspace() {
   workspaceEpoch += 1;
+  if (typeof Event !== 'undefined') document.dispatchEvent(new Event('editing-reset'));
   workspaceUserId = null;
   stopPolling();
   clearInterval(state.tickTimer); state.tickTimer = null;
@@ -307,9 +310,12 @@ function resetWorkspace() {
   assetList = []; assetSel = new Set(); taskListData = [];
   assetDeleteBusy = false;
   clearReferenceFiles();
+  if (typeof clearImageReferenceFiles === 'function') clearImageReferenceFiles();
+  if (typeof imageGenerationMonitorToken !== 'undefined') imageGenerationMonitorToken += 1;
+  if (typeof imageGenerationBusy !== 'undefined') imageGenerationBusy = false;
   generationMonitorToken += 1;
   generationBusy = false;
-  updateCreationWorkspace(false);
+  updateCreationWorkspace('generate');
   clearGenerationPreview();
   for (const selector of ['#assetGrid', '#taskList', '#list', '#homeAssets', '#toolsRecent', '#homeRecent', '#toolRecent']) {
     const node = document.querySelector(selector);
@@ -323,8 +329,12 @@ function resetWorkspace() {
   if (el.fileInput) el.fileInput.value = '';
   if (el.linkInputs) el.linkInputs.value = '';
   if (homeCmd) homeCmd.value = '';
+  if (typeof imagePrompt !== 'undefined' && imagePrompt) imagePrompt.value = '';
   const promptCount = document.getElementById('promptCount');
   if (promptCount) promptCount.textContent = '0';
+  const imagePromptCount = document.getElementById('imagePromptCount');
+  if (imagePromptCount) imagePromptCount.textContent = '0';
+  if (typeof imageGenerationPreview !== 'undefined' && imageGenerationPreview) imageGenerationPreview.hidden = true;
   if (referenceInput) referenceInput.value = '';
   if (el.adminMask) el.adminMask.hidden = true;
   if (el.settingsMenu) el.settingsMenu.hidden = true;
@@ -2122,20 +2132,28 @@ async function addAssetToCreation(asset) {
   try {
     if (asset.kind === 'video' && referenceFiles.some((item)=>item.kind==='video')) { toast('视频复刻只能添加 1 个参考视频'); return; }
     const maxReferences = currentGenerationMode() === 'recreation' || asset.kind === 'video' ? 10 : currentGenerationMode() === 'keyframes' ? 2 : 9;
-    if (asset.kind !== 'text' && referenceFiles.length >= maxReferences) {
+    const activeReferenceCount = imageWorkspace ? imageReferenceFiles.length : referenceFiles.length;
+    if (asset.kind !== 'text' && activeReferenceCount >= maxReferences) {
       toast('参考素材数量已达上限，请先移除部分参考'); return;
     }
     const data = await jsonApi(`/api/assets/${encodeURIComponent(asset.id)}/reference`, { method: 'POST', body: JSON.stringify(asset.kind === 'video' ? {purpose:'recreation'} : {}) });
     if (data.text !== undefined) {
-      homeCmd.value = data.text;
-      homeCmd.dispatchEvent(new Event('input'));
+      const target = imageWorkspace ? imagePrompt : homeCmd;
+      target.value = data.text;
+      target.dispatchEvent(new Event('input'));
     } else {
       const ref = data.reference;
-      if (ref.kind === 'video') { updateCreationWorkspace(true); syncGenerationMode(); }
-      else if (currentGenerationMode() === 'text') { generationModeSelect.value = 'multi_image'; syncGenerationMode(); }
-      referenceFiles.push({ id: nextReferenceId(), referenceId: ref.id, kind: ref.kind, durationSec:ref.durationSec,
-        file: { name: ref.name, size: ref.size, type: ref.mime }, url: ref.localUrl });
-      renderReferencePreviews();
+      if (imageWorkspace && ref.kind === 'image') {
+        imageReferenceFiles.push({ id: nextReferenceId(), referenceId: ref.id,
+          file: { name: ref.name, size: ref.size, type: ref.mime }, url: ref.localUrl });
+        renderImageReferencePreviews();
+      } else {
+        if (ref.kind === 'video') { updateCreationWorkspace(true); syncGenerationMode(); }
+        else if (currentGenerationMode() === 'text') { generationModeSelect.value = 'multi_image'; syncGenerationMode(); }
+        referenceFiles.push({ id: nextReferenceId(), referenceId: ref.id, kind: ref.kind, durationSec:ref.durationSec,
+          file: { name: ref.name, size: ref.size, type: ref.mime }, url: ref.localUrl });
+        renderReferencePreviews();
+      }
     }
     switchPage('home'); window.scrollTo({ top: 0, behavior: 'smooth' });
     toast(asset.kind === 'text' ? '提示词已填入创作区' : asset.kind === 'image' ? '已添加到创作参考' : asset.kind === 'video' ? '已添加到视频复刻参考区' : '已添加到参考区；当前生成模型不支持音频参考');
@@ -2308,30 +2326,46 @@ function referenceKind(file) {
 }
 
 let recreationWorkspace = false;
+let imageWorkspace = false;
+let creationWorkspaceKind = 'generate';
 function currentGenerationMode() {
   return recreationWorkspace ? 'recreation' : (generationModeSelect?.value || 'text');
 }
 
 function updateCreationWorkspace(next) {
-  recreationWorkspace=next;
+  const kind = next === true ? 'recreation' : next === false ? 'generate' : String(next || 'generate');
+  creationWorkspaceKind = ['image', 'generate', 'recreation', 'editing'].includes(kind) ? kind : 'generate';
+  recreationWorkspace = creationWorkspaceKind === 'recreation';
+  imageWorkspace = creationWorkspaceKind === 'image';
   document.querySelectorAll('[data-creation-workspace]').forEach(tab=>{
-    const selected=(tab.dataset.creationWorkspace==='recreation')===next;
+    const selected=tab.dataset.creationWorkspace===creationWorkspaceKind;
     tab.classList.toggle('is-active',selected);tab.setAttribute('aria-pressed',String(selected));
   });
-  document.getElementById('creationWorkspace')?.classList.toggle('is-recreation',next);
-  const hypitLabel=document.getElementById('hypitModelLabel');if(hypitLabel)hypitLabel.hidden=!next;
-  const modeControl=generationModeSelect?.closest('.composer-select');if(modeControl)modeControl.hidden=next;
+  document.getElementById('creationWorkspace')?.classList.toggle('is-recreation',recreationWorkspace);
+  const imageComposer=document.getElementById('imageComposer');if(imageComposer)imageComposer.hidden=!imageWorkspace;
+  const videoComposer=document.getElementById('videoComposer');if(videoComposer)videoComposer.hidden=imageWorkspace||creationWorkspaceKind==='editing';
+  const editingComposer=document.getElementById('editingComposer');if(editingComposer)editingComposer.hidden=creationWorkspaceKind!=='editing';
+  document.dispatchEvent(new CustomEvent('editing-workspace',{detail:creationWorkspaceKind}));
+  const hypitLabel=document.getElementById('hypitModelLabel');if(hypitLabel)hypitLabel.hidden=!recreationWorkspace;
+  const modeControl=generationModeSelect?.closest('.composer-select');if(modeControl)modeControl.hidden=recreationWorkspace;
+  if (imageWorkspace || creationWorkspaceKind==='editing') {
+    if (generationPreview) generationPreview.hidden=true;
+  } else {
+    const imagePreview=document.getElementById('imageGenerationPreview');if(imagePreview)imagePreview.hidden=true;
+  }
 }
 
 document.querySelectorAll('[data-creation-workspace]').forEach(button=>button.addEventListener('click',()=>{
-  const next=button.dataset.creationWorkspace==='recreation';
-  if (next===recreationWorkspace) return;
-  if (generationBusy) { toast('当前任务完成后再切换创作方式'); return; }
-  clearReferenceFiles();updateCreationWorkspace(next);
+  const next=button.dataset.creationWorkspace;
+  if (next===creationWorkspaceKind) return;
+  if (generationBusy || imageGenerationBusy) { toast('当前任务完成后再切换创作方式'); return; }
+  if (next !== 'image' && creationWorkspaceKind !== 'image') clearReferenceFiles();
+  updateCreationWorkspace(next);
   generationVideo?.pause();
   if (generationPreview) generationPreview.hidden=true;
   syncGenerationMode();syncGenerationBatchHint();
-  if (currentHomeGeneration && (currentHomeGeneration.mode==='recreation')===next) renderGenerationPreview(currentHomeGeneration);
+  if (!imageWorkspace && currentHomeGeneration && (currentHomeGeneration.mode==='recreation')===recreationWorkspace) renderGenerationPreview(currentHomeGeneration);
+  if (imageWorkspace) restoreImageGeneration().catch(()=>{});
 }));
 
 function clearReferenceFiles() {
@@ -2482,6 +2516,153 @@ referencePreviewList?.addEventListener('click', (event) => {
   renderReferencePreviews();
 });
 
+/* ---------------------------------------------------------------- 图片生成 */
+const imagePrompt = document.getElementById('imagePrompt');
+const imageGenerateBtn = document.getElementById('imageGenerateBtn');
+const imageReferenceInput = document.getElementById('imageReferenceInput');
+const imageReferencePreviews = document.getElementById('imageReferencePreviews');
+const imageReferencePreviewList = document.getElementById('imageReferencePreviewList');
+const imageReferencePreviewCount = document.getElementById('imageReferencePreviewCount');
+const imageGenerationPreview = document.getElementById('imageGenerationPreview');
+const imageGenerationResults = document.getElementById('imageGenerationResults');
+const imageGenerationTitle = document.getElementById('imageGenerationTitle');
+const imageGenerationDetail = document.getElementById('imageGenerationDetail');
+const imageReferenceFiles = [];
+let imageGenerationBusy = false;
+let imageGenerationMonitorToken = 0;
+
+function clearImageReferenceFiles() {
+  for (const item of imageReferenceFiles) URL.revokeObjectURL(item.url);
+  imageReferenceFiles.splice(0);
+  renderImageReferencePreviews();
+}
+
+function renderImageReferencePreviews() {
+  if (!imageReferencePreviews || !imageReferencePreviewList) return;
+  imageReferencePreviewList.replaceChildren();
+  imageReferencePreviews.hidden = imageReferenceFiles.length === 0;
+  if (imageReferencePreviewCount) imageReferencePreviewCount.textContent = `${imageReferenceFiles.length} / 9 张`;
+  imageReferenceFiles.forEach((item, index) => {
+    const card = document.createElement('div'); card.className='reference-preview-item is-image'; card.title=item.file.name;
+    const img=document.createElement('img');img.src=item.url;img.alt='';card.appendChild(img);
+    const label=document.createElement('span');label.className='reference-preview-label';label.textContent=`参考图 ${index+1}`;card.appendChild(label);
+    const remove=document.createElement('button');remove.type='button';remove.className='reference-preview-remove';remove.dataset.imageReferenceId=item.id;remove.setAttribute('aria-label',`删除参考图 ${index+1}`);remove.textContent='×';card.appendChild(remove);
+    imageReferencePreviewList.appendChild(card);
+  });
+}
+
+function syncImageGenerationUI() {
+  const ready = state.config?.imageGeneration?.ready !== false;
+  const modelLabel=document.getElementById('imageModelLabel');
+  if(modelLabel){const model=String(state.config?.imageGeneration?.model||'Seedream');const version=model.match(/seedream-(\d)-(\d)/i);modelLabel.textContent=version?`Seedream ${version[1]}.${version[2]}`:'Seedream';}
+  if (imageGenerateBtn) {
+    imageGenerateBtn.disabled = imageGenerationBusy || !ready;
+    imageGenerateBtn.title = ready ? '生成图片' : '图片模型尚未配置';
+    imageGenerateBtn.textContent = imageGenerationBusy ? '…' : '↑';
+  }
+  if (imagePrompt) imagePrompt.disabled = imageGenerationBusy;
+  if (imageReferenceInput) imageReferenceInput.disabled = imageGenerationBusy;
+  for (const id of ['imageRatio','imageResolution','imageCount']) {
+    const control=document.getElementById(id);if(control)control.disabled=imageGenerationBusy;
+  }
+  document.getElementById('imageReferenceTrigger')?.classList.toggle('is-disabled',imageGenerationBusy);
+  const status=document.getElementById('imageGenerationStatus');
+  if (status && !imageGenerationBusy) status.textContent = ready
+    ? '输入描述即可文生图，也可添加 1–9 张参考图进行图生图'
+    : '图片生成服务尚未配置，请联系管理员设置 ARK_API_KEY';
+}
+
+imageReferenceInput?.addEventListener('change', () => {
+  let added=0,rejected=0;
+  for (const file of Array.from(imageReferenceInput.files || [])) {
+    const kind=referenceKind(file);
+    const duplicate=imageReferenceFiles.some((item)=>item.file.name===file.name&&item.file.size===file.size&&item.file.lastModified===file.lastModified);
+    if (kind!=='image'||duplicate||imageReferenceFiles.length>=9||file.size>30*1024**2) {rejected+=1;continue;}
+    imageReferenceFiles.push({id:nextReferenceId(),file,url:URL.createObjectURL(file),referenceId:null});added+=1;
+  }
+  imageReferenceInput.value='';renderImageReferencePreviews();
+  if(added)toast(`已添加 ${added} 张参考图`);if(rejected)toast(`已跳过 ${rejected} 张重复、无效或超出限制的图片`);
+});
+
+imageReferencePreviewList?.addEventListener('click',(event)=>{
+  const button=event.target.closest('[data-image-reference-id]');if(!button||imageGenerationBusy)return;
+  const index=imageReferenceFiles.findIndex((item)=>item.id===button.dataset.imageReferenceId);if(index<0)return;
+  URL.revokeObjectURL(imageReferenceFiles[index].url);imageReferenceFiles.splice(index,1);renderImageReferencePreviews();
+});
+
+imagePrompt?.addEventListener('input',()=>{const count=document.getElementById('imagePromptCount');if(count)count.textContent=String(imagePrompt.value.length);});
+imagePrompt?.addEventListener('keydown',(event)=>{if((event.metaKey||event.ctrlKey)&&event.key==='Enter')runImageGeneration();});
+
+async function uploadImageReference(item) {
+  if(item.referenceId)return item.referenceId;
+  const response=await fetch('/api/video-references',{method:'POST',credentials:'same-origin',headers:{'content-type':item.file.type||'application/octet-stream','x-file-name':encodeURIComponent(item.file.name)},body:item.file});
+  const data=await response.json().catch(()=>({}));
+  if(response.status===401)showLogin('会话已过期，请重新登录');
+  if(!response.ok)throw new Error(data.error||`参考图片上传失败（HTTP ${response.status}）`);
+  item.referenceId=data.reference.id;return item.referenceId;
+}
+
+function renderImageGeneration(generation) {
+  if(!imageGenerationPreview||!imageGenerationResults||!generation)return;
+  const status=String(generation.status||'RUNNING').toUpperCase();
+  imageGenerationPreview.hidden=!imageWorkspace;
+  imageGenerationPreview.classList.toggle('is-failed',status==='FAILED');
+  imageGenerationResults.replaceChildren();
+  if(['SUCCESS','PARTIAL'].includes(status)&&generation.assets?.length){
+    if(imageGenerationTitle)imageGenerationTitle.textContent=status==='PARTIAL'?'部分图片生成完成':'图片生成完成';
+    generation.assets.forEach((asset,index)=>{const img=document.createElement('img');img.src=asset.url;img.alt=`生成图片 ${index+1}`;img.loading='eager';imageGenerationResults.appendChild(img);});
+    return;
+  }
+  const loading=document.createElement('div');loading.className='image-generation-loading';
+  const loader=document.createElement('div');loader.className='generation-loader';loader.setAttribute('aria-hidden','true');loader.innerHTML='<i></i><span></span>';
+  const detail=document.createElement('p');detail.textContent=status==='FAILED'?(generation.error||'图片生成失败，请稍后重试'):'AI 正在构建画面，请耐心等待…';
+  loading.append(loader,detail);imageGenerationResults.appendChild(loading);
+  if(imageGenerationTitle)imageGenerationTitle.textContent=status==='FAILED'?'图片生成失败':'正在生成图片';
+}
+
+async function monitorImageGeneration(initial) {
+  const token=++imageGenerationMonitorToken;let generation=initial;
+  imageGenerationBusy=String(generation.status).toUpperCase()==='RUNNING';syncImageGenerationUI();renderImageGeneration(generation);
+  while(token===imageGenerationMonitorToken&&String(generation.status).toUpperCase()==='RUNNING'){
+    await new Promise((resolve)=>setTimeout(resolve,2000));
+    if(token!==imageGenerationMonitorToken)return;
+    try{const data=await jsonApi('/api/image-generations/current',{timeoutMs:35000});if(!data.generation)return;generation=data.generation;renderImageGeneration(generation);}catch{/* 自动重试 */}
+  }
+  if(token!==imageGenerationMonitorToken)return;
+  imageGenerationBusy=false;syncImageGenerationUI();
+  if(generation.status==='SUCCESS'){toast('图片生成完成，已保存到资产');loadAssets().catch(()=>{});}
+  else if(generation.status==='PARTIAL'){toast('部分图片生成完成，已保存到资产');loadAssets().catch(()=>{});}
+  else toast(`图片生成失败：${generation.error||'请稍后重试'}`);
+}
+
+async function restoreImageGeneration(){
+  if(!imageWorkspace)return;
+  const data=await jsonApi('/api/image-generations/current',{timeoutMs:35000});
+  if(!data.generation){if(imageGenerationPreview)imageGenerationPreview.hidden=true;return;}
+  if(String(data.generation.status).toUpperCase()==='RUNNING')monitorImageGeneration(data.generation);else renderImageGeneration(data.generation);
+}
+
+async function runImageGeneration(){
+  if(imageGenerationBusy)return;
+  if(!state.config?.imageGeneration?.ready){toast('图片生成模型尚未配置，请联系管理员设置 ARK_API_KEY');return;}
+  const prompt=String(imagePrompt?.value||'').trim();if(!prompt){toast('先描述一下想生成的图片');imagePrompt?.focus();return;}
+  const requestEpoch=workspaceEpoch;
+  imageGenerationBusy=true;syncImageGenerationUI();renderImageGeneration({status:'RUNNING'});
+  const statusLine=document.getElementById('imageGenerationStatus');if(statusLine)statusLine.textContent='正在上传参考图并生成图片…';
+  try{
+    const referenceIds=[];for(const item of imageReferenceFiles){referenceIds.push(await uploadImageReference(item));if(requestEpoch!==workspaceEpoch)return;}
+    const generation=await jsonApi('/api/image-generations',{method:'POST',timeoutMs:750000,body:JSON.stringify({prompt,referenceIds,ratio:document.getElementById('imageRatio')?.value||'1:1',resolution:document.getElementById('imageResolution')?.value||'2K',count:Number(document.getElementById('imageCount')?.value||1)})});
+    if(requestEpoch!==workspaceEpoch)return;renderImageGeneration(generation);imageGenerationBusy=false;syncImageGenerationUI();toast('图片生成完成，已保存到资产');loadAssets().catch(()=>{});
+  }catch(err){
+    if(requestEpoch!==workspaceEpoch)return;
+    if(err.code==='TIMEOUT'||err.status===409){const current=err.data?.generation||(await jsonApi('/api/image-generations/current',{timeoutMs:35000}).catch(()=>({}))).generation;if(current){monitorImageGeneration(current);return;}}
+    const failedGeneration=err.data?.generation||{status:'FAILED',error:err.message};
+    renderImageGeneration(failedGeneration);imageGenerationBusy=false;syncImageGenerationUI();
+    if(failedGeneration.status==='PARTIAL'){toast('部分图片生成完成，已保存到资产');loadAssets().catch(()=>{});}else toast(`图片生成失败：${err.message}`);
+  }
+}
+imageGenerateBtn?.addEventListener('click',runImageGeneration);
+
 function firstResultUrl(value) {
   if (typeof value === 'string' && (/^https?:\/\//i.test(value) || value.startsWith('/api/assets/'))) return value;
   if (Array.isArray(value)) {
@@ -2511,7 +2692,7 @@ function setGenerationLocked(locked) {
     const control = document.getElementById(id);
     if (control) control.disabled = locked;
   }
-  document.querySelector('.creation-composer')?.classList.toggle('is-locked', locked);
+  document.getElementById('videoComposer')?.classList.toggle('is-locked', locked);
   generationPreview?.classList.toggle('is-busy', locked);
   for (const button of document.querySelectorAll('.reference-preview-remove')) button.disabled = locked;
   if (homeGo) homeGo.textContent = locked ? '…' : '↑';
@@ -2550,7 +2731,7 @@ function generationFailureMessage(generation) {
 function renderGenerationPreview(generation) {
   if (!generationPreview || !generation) return;
   currentHomeGeneration = generation;
-  if ((generation.mode==='recreation') !== recreationWorkspace) {
+  if ((typeof imageWorkspace !== 'undefined' && imageWorkspace) || (typeof creationWorkspaceKind !== 'undefined' && creationWorkspaceKind==='editing') || (generation.mode==='recreation') !== recreationWorkspace) {
     generationVideo?.pause();generationPreview.hidden=true;
     const empty=document.getElementById('recreationShowcase');if(empty)empty.hidden=!recreationWorkspace;
     return;
@@ -2666,7 +2847,7 @@ function renderGenerationPreview(generation) {
 }
 
 async function monitorGeneration(initial) {
-  updateCreationWorkspace(initial.mode==='recreation');
+  updateCreationWorkspace(initial.mode==='recreation' ? 'recreation' : 'generate');
   syncGenerationMode();
   const token = ++generationMonitorToken;
   let generation = initial;
@@ -2723,7 +2904,7 @@ async function restoreHomeGeneration() {
     clearGenerationPreview();
     return;
   }
-  updateCreationWorkspace(data.generation.mode==='recreation');syncGenerationMode();syncGenerationBatchHint();
+  updateCreationWorkspace(data.generation.mode==='recreation' ? 'recreation' : 'generate');syncGenerationMode();syncGenerationBatchHint();
   if (ACTIVE_GENERATION_STATES.has(String(data.generation.status || '').toUpperCase())) {
     monitorGeneration(data.generation);
   } else {
@@ -2733,7 +2914,7 @@ async function restoreHomeGeneration() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && !generationBusy && el.authGate.hidden) restoreHomeGeneration().catch(() => {});
+  if (!document.hidden && !generationBusy && !imageWorkspace && creationWorkspaceKind!=='editing' && el.authGate.hidden) restoreHomeGeneration().catch(() => {});
 });
 
 async function uploadVideoReference(item, index, total, { silent = false } = {}) {
@@ -3073,4 +3254,6 @@ function syncToolsAside() {
     box.appendChild(row);
   }
 }
+
+setupEditing({jsonApi,toast,fmtBytes,state,getWorkspaceEpoch:()=>workspaceEpoch});
 

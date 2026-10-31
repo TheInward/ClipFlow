@@ -81,10 +81,12 @@
         <div class="creation-hero">
           <p class="eyebrow">AI CREATIVE STUDIO</p>
           <h1>让灵感，直接成为作品。</h1>
-          <p>从文字与参考素材生成视频，并在一个工作台完成字幕、画质与发布前处理。</p>
+          <p>从文字与参考素材生成图片或视频，并在一个工作台完成字幕、画质与发布前处理。</p>
         </div>
 
         <nav class="creation-workspace-tabs" aria-label="创作类型">
+          <button type="button" class="creation-workspace-tab" data-creation-workspace="image">图片生成</button>
+          <button type="button" class="creation-workspace-tab" data-creation-workspace="editing">视频剪辑</button>
           <button type="button" class="creation-workspace-tab is-active" data-creation-workspace="generate">视频生成</button>
           <button type="button" class="creation-workspace-tab" data-creation-workspace="recreation">视频复刻</button>
         </nav>
@@ -94,7 +96,47 @@
           <h2>把喜欢的视频，复刻成你的作品。</h2>
           <p>上传参考视频和替换素材，描述你想改变的内容。</p>
         </aside>
-        <section class="creation-composer" aria-label="视频生成工作台">
+        <section class="creation-composer" id="editingComposer" aria-label="视频剪辑工作台" hidden>
+          <div class="edit-heading"><div><p class="eyebrow">AI VIDEO EDITOR</p><h2>好素材，剪成好作品。</h2></div><span>Vibe Editing</span></div>
+          <div class="edit-modes" id="editModes"><button type="button" data-edit-mode="talk" class="is-active" aria-pressed="true"><b>口播剪辑</b><small>精简停顿 · 保留原声 · 讲述连贯</small></button><button type="button" data-edit-mode="commerce" aria-pressed="false"><b>带货混剪</b><small>商品展示 · 卖点编排 · 购买引导</small></button></div>
+          <label class="edit-upload">＋ 添加视频 / 图片 / 配乐<input type="file" id="editFiles" multiple accept=".mp4,.mov,.webm,.jpg,.jpeg,.png,.webp,.mp3,.wav,.m4a"/><small>至少 1 个视频，最多 12 个素材</small></label>
+          <div id="editFileList" class="edit-file-list"></div>
+          <label class="edit-field" id="editProductField" hidden>商品名称与真实卖点<textarea id="editProduct" maxlength="1000" rows="2" placeholder="例如：便携保温杯，500ml，旋盖防漏；结尾引导查看商品详情"></textarea></label>
+          <label class="edit-field">剪辑要求<textarea id="editPrompt" maxlength="2000" rows="3">精简明显停顿、口误和重复表达，保留完整观点，让口播自然流畅，字幕简洁清晰。</textarea></label>
+          <div class="creation-toolbar"><label class="composer-select">目标时长 <select id="editDuration"><option value="15">15 秒</option><option value="30" selected>30 秒</option><option value="60">60 秒</option><option value="90">90 秒</option></select></label><label class="composer-select">画幅 <select id="editRatio"><option>9:16</option><option>16:9</option><option>1:1</option></select></label><label class="edit-subtitle"><input id="editSubtitles" type="checkbox" checked/> 添加字幕</label><button class="btn btn-primary" id="editSubmit" type="button">开始剪辑 →</button></div>
+          <p class="creation-tip" id="editServiceStatus">正在检查剪辑服务…</p><p class="creation-tip">目标时长和剪辑要求由 AI 尽力执行；输出后可预览检查。云端按实际使用计费。</p>
+          <div id="editJobs" class="edit-jobs" aria-live="polite"></div>
+        </section>
+        <section class="creation-composer image-composer" id="imageComposer" aria-label="图片生成工作台" hidden>
+          <div class="reference-previews" id="imageReferencePreviews" hidden>
+            <div class="reference-preview-list" id="imageReferencePreviewList"></div>
+            <span class="reference-preview-count" id="imageReferencePreviewCount">0 / 9 张</span>
+          </div>
+          <label class="creation-prompt" for="imagePrompt">
+            <textarea id="imagePrompt" rows="3" maxlength="1000" placeholder="描述主体、风格、构图、色彩与光影……"></textarea>
+            <small><span id="imagePromptCount">0</span> / 1000</small>
+          </label>
+          <div class="creation-toolbar">
+            <label class="reference-trigger" id="imageReferenceTrigger" title="添加参考图片">
+              <input id="imageReferenceInput" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple />
+              <span aria-hidden="true">＋</span><b>参考</b>
+            </label>
+            <span class="hypit-model-label image-model-label" id="imageModelLabel">Seedream</span>
+            <div class="composer-specs image-specs">
+              <label><select id="imageRatio" aria-label="图片比例"><option value="1:1">1:1</option><option value="4:3">4:3</option><option value="3:4">3:4</option><option value="16:9">16:9</option><option value="9:16">9:16</option></select></label>
+              <span>/</span>
+              <label><select id="imageResolution" aria-label="图片清晰度"><option value="2K">2K</option><option value="4K">4K</option></select></label>
+              <span>/</span>
+              <label><select id="imageCount" aria-label="生成张数"><option value="1">1 张</option><option value="2">2 张</option><option value="3">3 张</option><option value="4">4 张</option></select></label>
+            </div>
+            <div class="creation-actions">
+              <span class="creation-cost"><i aria-hidden="true">✦</i> 按模型计费</span>
+              <button class="creation-submit" type="button" id="imageGenerateBtn" aria-label="生成图片">↑</button>
+            </div>
+          </div>
+          <p class="creation-tip" id="imageGenerationStatus">输入描述即可文生图，也可添加 1–9 张参考图进行图生图</p>
+        </section>
+        <section class="creation-composer" id="videoComposer" aria-label="视频生成工作台">
           <div class="reference-previews" id="referencePreviews" aria-label="已添加的参考素材" hidden>
             <div class="reference-preview-list" id="referencePreviewList"></div>
             <span class="reference-preview-count" id="referencePreviewCount">0 个参考</span>
@@ -132,6 +174,11 @@
           <p class="recreation-help" id="recreationHelp" hidden>参考素材：1 个 2–15 秒的 MP4/MOV 视频（≤50 MB），1–9 张替换图片。可替换主体或背景，动作还原程度以模型输出为准。</p>
           <p class="creation-tip" id="generationStatus">文生视频无需参考文件，输入描述即可生成</p>
           <p class="creation-tip" id="generationBatchHint" hidden></p>
+        </section>
+
+        <section class="image-generation-preview" id="imageGenerationPreview" aria-live="polite" hidden>
+          <div class="image-generation-head"><div><span>IMAGE GENERATION</span><strong id="imageGenerationTitle">正在生成图片</strong></div><button class="btn btn-ghost" type="button" data-page-go="assets">查看资产</button></div>
+          <div class="image-generation-results" id="imageGenerationResults"><div class="image-generation-loading"><div class="generation-loader" aria-hidden="true"><i></i><span></span></div><p id="imageGenerationDetail">AI 正在构建画面，请耐心等待…</p></div></div>
         </section>
 
         <section class="generation-preview-panel" id="generationPreview" aria-live="polite" hidden>

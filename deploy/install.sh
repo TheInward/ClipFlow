@@ -156,7 +156,7 @@ prepare_user() {
 copy_app() {
   log "拷贝应用文件到 ${APP_DIR}"
   mkdir -p "$APP_DIR"
-  for f in server.mjs pipeline.mjs media.mjs zip.mjs accounts.mjs ratelimit.mjs recreation.mjs video-variants.mjs minimax-h3.mjs hypit-recreation.mjs package.json README.md; do
+  for f in server.mjs pipeline.mjs media.mjs zip.mjs accounts.mjs ratelimit.mjs recreation.mjs video-variants.mjs minimax-h3.mjs hypit-recreation.mjs vibe-editing.mjs package.json README.md; do
     [ -f "$SRC_DIR/$f" ] && cp -f "$SRC_DIR/$f" "$APP_DIR/"
   done
   rm -rf "$APP_DIR/public"
@@ -364,7 +364,7 @@ main() {
 verify_files() {
   # 与解包目录（$SRC_DIR）逐字节比对，确认所有文件都已拷到安装目录
   local miss=0 total=0 f
-  for f in server.mjs pipeline.mjs media.mjs zip.mjs accounts.mjs ratelimit.mjs recreation.mjs video-variants.mjs minimax-h3.mjs hypit-recreation.mjs package.json \
+  for f in server.mjs pipeline.mjs media.mjs zip.mjs accounts.mjs ratelimit.mjs recreation.mjs video-variants.mjs minimax-h3.mjs hypit-recreation.mjs vibe-editing.mjs package.json \
            public/index.html public/app.js public/styles.css public/md5.js public/md5-worker.js public/favicon.svg; do
     [ -f "$SRC_DIR/$f" ] || continue
     total=$((total + 1))

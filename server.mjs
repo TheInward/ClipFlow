@@ -28,6 +28,7 @@ import { probeVideoDuration, probeAvailable, probeVideoSize } from './media.mjs'
 import { assertRecreationVideo, validateRecreationReferences } from './recreation.mjs';
 import { hypitConfiguration, submitHypitRecreation, queryHypitRecreation } from './hypit-recreation.mjs';
 import { normalizeH3Response } from './minimax-h3.mjs';
+import { editingConfig, buildEditingRequest, editingRequest } from './vibe-editing.mjs';
 import { createGenerationVariants, GENERATION_COUNTS } from './video-variants.mjs';
 import { normalizePhone, findUserByPhone, createUser, checkPassword, publicUser, createUserSession, chargeSeconds, refundSeconds, createCodes, redeemCode, ensureAdmin, setPassword, touchSession, SESSION_TTL_MS } from './accounts.mjs';
 import { take as takeToken, stats as rateStats } from './ratelimit.mjs';
@@ -100,6 +101,13 @@ const AUTODL_VIDEO_WORKFLOW = String(process.env.AUTODL_VIDEO_WORKFLOW || 'minim
 const AUTODL_IMAGE_VIDEO_WORKFLOW = String(process.env.AUTODL_IMAGE_VIDEO_WORKFLOW || 'minimax_h3_lightx2v_v5_15s').trim();
 const AUTODL_KEYFRAME_VIDEO_WORKFLOW = String(process.env.AUTODL_KEYFRAME_VIDEO_WORKFLOW || 'minimax_h3_lightx2v').trim();
 const AUTODL_READY = Boolean(AUTODL_API_TOKEN && AUTODL_VIDEO_WORKFLOW && AUTODL_IMAGE_VIDEO_WORKFLOW && AUTODL_KEYFRAME_VIDEO_WORKFLOW);
+const ARK_API_BASE = String(process.env.ARK_API_BASE || 'https://ark.cn-beijing.volces.com/api/v3').replace(/\/+$/, '');
+const ARK_API_KEY = String(process.env.ARK_API_KEY || '').replace(/^Bearer\s+/i, '').trim();
+const SEEDREAM_MODEL = String(process.env.SEEDREAM_MODEL || 'doubao-seedream-4-5-251128').trim();
+const IMAGE_GENERATION_READY = Boolean(ARK_API_KEY && SEEDREAM_MODEL);
+const IMAGE_GENERATION_COUNTS = new Set([1, 2, 3, 4]);
+const IMAGE_GENERATION_RATIOS = new Set(['1:1', '4:3', '3:4', '16:9', '9:16']);
+const IMAGE_GENERATION_RESOLUTIONS = new Set(['2K', '4K']);
 const AUTODL_VIDEO_RESOLUTIONS = new Set([
   '480p竖', '768p竖',
 ]);
@@ -382,10 +390,22 @@ db.creditLedger ||= [];
 db.redemptionCodes ||= {};
 db.abuseEvents ||= [];
 db.videoGenerations ||= {};
+db.editingJobs ||= {};
+for(const job of Object.values(db.editingJobs))if(job.status==='submitting'){job.status='unknown';job.error='服务重启，提交结果待确认，请联系管理员核查。';}
 db.videoGenerationCurrent ||= {};
+db.imageGenerations ||= {};
+db.imageGenerationCurrent ||= {};
 db.references ||= {};
 db.assets ||= {};
 db.assetTombstones ||= {};
+for (const generation of Object.values(db.imageGenerations)) {
+  if (generation.status === 'RUNNING') {
+    generation.status = generation.assetIds?.length ? 'PARTIAL' : 'FAILED';
+    generation.error = '服务重启中断了图片生成，请重新提交';
+    generation.errorCode = 'SERVER_RESTARTED';
+    generation.updatedAt = new Date().toISOString();
+  }
+}
 // Asset references have independent lifetime; keep existing uploaded references available.
 for (const reference of Object.values(db.references)) {
   reference.persistent = true;
@@ -2318,6 +2338,45 @@ async function autodlRequest(pathname, { method = 'GET', body, h3 = false } = {}
   return h3 ? normalizeH3Response(data, method) : data;
 }
 
+/** 火山方舟 Seedream 图片生成。密钥只保存在服务端，生成结果以 base64 返回后立即落盘。 */
+async function seedreamGenerate({ prompt, size, images = [] }) {
+  if (!IMAGE_GENERATION_READY) throw Object.assign(new Error('图片生成服务尚未配置'), { status: 503, errorCode: 'IMAGE_PROVIDER_NOT_CONFIGURED' });
+  const response = await fetch(`${ARK_API_BASE}/images/generations`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(180_000),
+    headers: { Authorization: `Bearer ${ARK_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: SEEDREAM_MODEL,
+      prompt,
+      size,
+      ...(images.length ? { image: images.length === 1 ? images[0] : images } : {}),
+      response_format: 'b64_json',
+      sequential_image_generation: 'disabled',
+      watermark: false,
+    }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const upstreamMessage = String(data?.error?.message || data?.message || `方舟 HTTP ${response.status}`);
+    let message = upstreamMessage;
+    let errorCode = 'IMAGE_PROVIDER_REQUEST_FAILED';
+    if (response.status === 401 || /unauthori[sz]ed|invalid.*(?:key|token)/i.test(upstreamMessage)) {
+      message = '图片生成服务鉴权失败，请联系管理员检查 ARK_API_KEY。';
+      errorCode = 'IMAGE_PROVIDER_AUTH_FAILED';
+    } else if (response.status === 429 || /rate limit|too many requests|限流/i.test(upstreamMessage)) {
+      message = '图片生成服务当前请求过多，请稍后再试。';
+      errorCode = 'IMAGE_PROVIDER_RATE_LIMITED';
+    } else if (/content.*(?:moderation|safety)|sensitive|risk|审核/i.test(upstreamMessage)) {
+      message = '服务商未通过本次内容审核，请调整描述或参考图片后重试。';
+      errorCode = 'IMAGE_PROVIDER_CONTENT_REJECTED';
+    }
+    throw Object.assign(new Error(message), { status: response.status === 401 ? 502 : response.status, errorCode });
+  }
+  const result = Array.isArray(data?.data) ? data.data.find((item) => item?.b64_json) : null;
+  if (!result?.b64_json) throw Object.assign(new Error('图片生成服务未返回图片数据'), { status: 502, errorCode: 'IMAGE_PROVIDER_EMPTY_RESULT' });
+  return { bytes: Buffer.from(result.b64_json, 'base64'), size: result.size || size };
+}
+
 async function submitRecreation(prompt, parameters, references) {
   return submitHypitRecreation({prompt:`${prompt}\n\n${VIDEO_GENERATION_CONSTRAINTS}`,parameters,references,dataDir:DATA_DIR});
 }
@@ -2722,8 +2781,43 @@ function ownedAsset(req, assetId) {
   return asset;
 }
 
+function generatedImageType(bytes) {
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return { ext: '.png', mime: 'image/png' };
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) return { ext: '.jpg', mime: 'image/jpeg' };
+  if (bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP') return { ext: '.webp', mime: 'image/webp' };
+  throw Object.assign(new Error('图片生成服务返回了不支持的文件格式'), { status: 502 });
+}
+
+async function saveGeneratedImage(generation, bytes, index) {
+  const type = generatedImageType(bytes);
+  const assetId = `image-generation:${generation.taskId}:${index}`;
+  const basename = crypto.createHash('sha256').update(assetId).digest('hex');
+  const dest = path.join(ASSET_DIR, `${basename}${type.ext}`);
+  const tmp = `${dest}.incoming`;
+  await fsp.writeFile(tmp, bytes, { mode: 0o600 });
+  await fsp.rename(tmp, dest);
+  const asset = {
+    id: assetId, userId: generation.userId, kind: 'image', ext: type.ext, mime: type.mime,
+    name: `生成图片-${generation.taskId}-${index + 1}${type.ext}`, source: 'generation', state: 'ready',
+    storedPath: path.relative(DATA_DIR, dest), size: bytes.length, createdAt: new Date().toISOString(),
+  };
+  db.assets[assetId] = asset;
+  return asset;
+}
+
+function serializeImageGeneration(generation) {
+  return {
+    taskId: generation.taskId, status: generation.status, prompt: generation.prompt,
+    ratio: generation.ratio, resolution: generation.resolution, count: generation.count,
+    model: generation.model, createdAt: generation.createdAt, updatedAt: generation.updatedAt,
+    error: generation.error || null, errorCode: generation.errorCode || null,
+    assets: (generation.assetIds || []).map((assetId) => db.assets[assetId]).filter(Boolean).map(serializeAsset),
+  };
+}
+
 async function deleteAssetRecord(asset) {
   const refs = Object.values(db.references).filter((ref) => ref.assetId === asset.id);
+  if(Object.values(db.editingJobs).some(j=>['submitting','running','unknown'].includes(j.status)&&refs.some(r=>j.referenceIds.includes(r.id))))throw Object.assign(new Error('素材正在用于视频剪辑'),{status:409});
   if (videoGenerationSubmissionLocks.has(asset.userId) || Object.values(db.videoGenerations).some((g) => VIDEO_GENERATION_ACTIVE.has(g.status)
     && refs.some((ref) => g.referenceIds?.includes(ref.id)))) {
     throw Object.assign(new Error('素材正在用于生成，请等待任务完成后删除'), {status:409});
@@ -2738,7 +2832,61 @@ async function deleteAssetRecord(asset) {
   return refs.map((ref) => ref.id);
 }
 
+function serializeEditing(job) {
+  return {id:job.id,mode:job.mode,status:job.status,error:job.error||null,createdAt:job.createdAt,
+    duration:job.duration,ratio:job.ratio,assets:job.assetIds.map(key=>db.assets[key]).filter(Boolean).map(serializeAsset)};
+}
+let editingPolling=false;
+async function pollEditingJobs() {
+  if(editingPolling)return;editingPolling=true;
+  try {for(const job of Object.values(db.editingJobs)) {
+    if(job.status!=='running'||!job.remoteId)continue;
+    try {
+      const data=await editingRequest(`/tasks/${encodeURIComponent(job.remoteId)}`);
+      if(data.status==='failed'){job.status='failed';job.error=data.error?.message||'云端剪辑失败';}
+      else if(data.status==='completed') {
+        const artifacts=(data.result?.artifacts||[]).filter(a=>a.type==='video'&&/^https?:\/\//.test(a.url||''));
+        if(!artifacts.length){job.status='failed';job.error='剪辑任务完成但未返回视频';}
+        else {artifacts.forEach((item,index)=>{
+          const assetId=`editing:${job.id}:${index}`;
+          const asset=db.assets[assetId]||={id:assetId,userId:job.userId,kind:'video',ext:'.mp4',mime:'video/mp4',name:`${job.mode==='talk'?'口播':'带货'}剪辑-${index+1}.mp4`,source:'generation',state:'saving',remoteUrl:item.url,createdAt:new Date().toISOString()};
+          scheduleAssetSave(asset);if(!job.assetIds.includes(assetId))job.assetIds.push(assetId);
+        });job.status='completed';job.error=null;}
+      }
+      saveDb();
+    }catch(err){job.error=`状态查询暂时失败：${err.message}`;saveDb();}
+  }
+  for(const job of Object.values(db.editingJobs))for(const key of job.assetIds){const asset=db.assets[key];if(asset&&asset.state!=='ready')scheduleAssetSave(asset);}
+  }finally{editingPolling=false;}
+}
+
 const ROUTES = {
+  'GET /api/editing': async (req, res) => {
+    const jobs = Object.values(db.editingJobs).filter(j=>j.userId===currentUser(req).id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+    sendJson(res,200,{config:{ready:editingConfig().ready,missing:editingConfig().missing},jobs:jobs.map(serializeEditing)});
+  },
+  'POST /api/editing': async (req, res) => {
+    const userId=currentUser(req).id;
+    const body=await readJsonBody(req);
+    if(!editingConfig().ready)return sendError(res,503,`视频剪辑尚未配置：${editingConfig().missing.join('、')}`);
+    if(Object.values(db.editingJobs).some(j=>j.userId===userId&&['submitting','running','unknown'].includes(j.status)))return sendError(res,409,'当前剪辑任务尚未结束，请稍后再提交');
+    if(!['talk','commerce'].includes(body.mode)||![15,30,60,90].includes(Number(body.duration))||!['9:16','16:9','1:1'].includes(body.ratio))return sendError(res,400,'请选择有效的剪辑参数');
+    const prompt=String(body.prompt||'').trim(),product=String(body.product||'').trim();
+    if(!prompt||prompt.length>2000||product.length>1000)return sendError(res,400,'请填写剪辑要求（最多 2000 字），商品信息最多 1000 字');
+    const ids=Array.isArray(body.referenceIds)?[...new Set(body.referenceIds.map(String))]:[];
+    if(!ids.length||ids.length>12)return sendError(res,400,'请添加 1–12 个素材');
+    const refs=ids.map(key=>db.references[key]);
+    if(refs.some(r=>!r||r.userId!==userId||!['video','image','audio'].includes(r.kind)))return sendError(res,404,'素材不存在或不属于当前账号');
+    if(!refs.some(r=>r.kind==='video'))return sendError(res,400,'请至少添加一个视频素材');
+    const guard=diskGuard();if(!guard.ok)return sendError(res,507,diskLowMessage(guard.free));
+    const job={id:id('edit'),userId,mode:body.mode,duration:Number(body.duration),ratio:body.ratio,subtitles:body.subtitles===true,prompt,product,referenceIds:ids,status:'submitting',createdAt:new Date().toISOString(),assetIds:[]};
+    db.editingJobs[job.id]=job;saveDb();
+    try {const result=await editingRequest('/tools/vibe-editing',buildEditingRequest(job,refs,publicReferenceUrl));
+      if(!result.task_id)throw new Error('剪辑服务未返回任务编号');
+      job.remoteId=result.task_id;job.status='running';
+    } catch(err){job.status=err.rejected?'failed':'unknown';job.error=err.rejected?err.message:`提交结果待确认：${err.message}。请联系管理员核查，避免重复计费。`;}
+    saveDb();sendJson(res,202,serializeEditing(job));
+  },
   'POST /api/assets/delete': async (req, res) => {
     const body = await readJsonBody(req);
     const userId = currentUser(req).id;
@@ -2839,10 +2987,89 @@ const ROUTES = {
         referenceUpload: '/api/video-references',
         referenceTtlHours: UPLOAD_TTL_MS / 3600000,
       },
+      imageGeneration: {
+        ready: IMAGE_GENERATION_READY,
+        provider: '火山方舟',
+        model: SEEDREAM_MODEL,
+        ratios: [...IMAGE_GENERATION_RATIOS],
+        resolutions: [...IMAGE_GENERATION_RESOLUTIONS],
+        counts: [...IMAGE_GENERATION_COUNTS],
+        maxReferences: 9,
+        missing: IMAGE_GENERATION_READY ? [] : ['ARK_API_KEY'],
+      },
       dedupe: { key: 'md5', storage: 'content-addressed', precheck: '/api/uploads/precheck' },
       stages: STAGES.map(({ key, label, weight }) => ({ key, label, weight })),
       operations: Object.values(OPERATIONS).map(({ id: opId, label, desc, accent }) => ({ id: opId, label, desc, accent })),
     });
+  },
+
+  'GET /api/image-generations/current': async (req, res) => {
+    const userId = currentUser(req).id;
+    const generation = db.imageGenerations[db.imageGenerationCurrent[userId]] || null;
+    sendJson(res, 200, { generation: generation && generation.userId === userId ? serializeImageGeneration(generation) : null });
+  },
+
+  'POST /api/image-generations': async (req, res) => {
+    const user = currentUser(req);
+    if (!IMAGE_GENERATION_READY) return sendError(res, 503, '图片生成服务尚未配置，请联系管理员设置 ARK_API_KEY');
+    const current = db.imageGenerations[db.imageGenerationCurrent[user.id]];
+    if (current?.status === 'RUNNING') return sendError(res, 409, '当前图片仍在生成，请勿重复提交', { generation: serializeImageGeneration(current) });
+    const body = await readJsonBody(req);
+    const latest = db.imageGenerations[db.imageGenerationCurrent[user.id]];
+    if (latest?.status === 'RUNNING') return sendError(res, 409, '当前图片仍在生成，请勿重复提交', { generation: serializeImageGeneration(latest) });
+    const prompt = String(body.prompt || '').trim();
+    const ratio = String(body.ratio || '1:1');
+    const resolution = String(body.resolution || '2K').toUpperCase();
+    const count = Number(body.count || 1);
+    if (!prompt) return sendError(res, 400, '请输入图片描述');
+    if (prompt.length > 1000) return sendError(res, 400, '图片描述不能超过 1000 字');
+    if (!IMAGE_GENERATION_RATIOS.has(ratio)) return sendError(res, 400, '请选择有效的图片比例');
+    if (!IMAGE_GENERATION_RESOLUTIONS.has(resolution)) return sendError(res, 400, '图片清晰度仅支持 2K 或 4K');
+    if (!IMAGE_GENERATION_COUNTS.has(count)) return sendError(res, 400, '一次仅支持生成 1–4 张图片');
+    const referenceIds = Array.isArray(body.referenceIds) ? [...new Set(body.referenceIds.map(String))] : [];
+    if (referenceIds.length > 9) return sendError(res, 400, '图片生成最多支持 9 张参考图');
+    const references = referenceIds.map((referenceId) => db.references[referenceId]);
+    if (references.some((reference) => !reference || reference.userId !== user.id)) return sendError(res, 404, '参考图片不存在或不属于当前账号');
+    if (references.some((reference) => reference.kind !== 'image' || !IMAGE_REFERENCE_EXT.has(reference.ext))) return sendError(res, 415, '图片生成参考文件仅支持 JPG、PNG、WebP');
+    if (references.some((reference) => Number(reference.size || 0) > 30 * 1024 ** 2)) return sendError(res, 413, '单张参考图片不能超过 30 MB');
+
+    const generation = {
+      taskId: id('img'), userId: user.id, status: 'RUNNING', prompt, ratio, resolution, count,
+      model: SEEDREAM_MODEL, referenceIds, assetIds: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    };
+    db.imageGenerations[generation.taskId] = generation;
+    db.imageGenerationCurrent[user.id] = generation.taskId;
+    const promptAssetId = `prompt:${generation.taskId}`;
+    db.assets[promptAssetId] = { id: promptAssetId, userId: user.id, kind: 'text', ext: '.txt',
+      mime: 'text/plain; charset=utf-8', name: `图片提示词-${prompt.slice(0, 24)}.txt`, text: prompt,
+      size: Buffer.byteLength(prompt), state: 'ready', source: 'prompt', createdAt: generation.createdAt };
+    saveDb();
+
+    try {
+      const images = await Promise.all(references.map(async (reference) => {
+        const bytes = await fsp.readFile(path.join(DATA_DIR, reference.storedPath));
+        return `data:${reference.mime || MIME[reference.ext]};base64,${bytes.toString('base64')}`;
+      }));
+      const providerPrompt = `${prompt}\n\n画幅比例为 ${ratio}，构图严格适配该比例。`;
+      for (let index = 0; index < count; index += 1) {
+        const result = await seedreamGenerate({ prompt: providerPrompt, size: resolution, images });
+        const asset = await saveGeneratedImage(generation, result.bytes, index);
+        generation.assetIds.push(asset.id);
+        generation.updatedAt = new Date().toISOString();
+        saveDb();
+      }
+      generation.status = 'SUCCESS';
+      generation.updatedAt = new Date().toISOString();
+      saveDb();
+      sendJson(res, 201, serializeImageGeneration(generation));
+    } catch (err) {
+      generation.status = generation.assetIds.length ? 'PARTIAL' : 'FAILED';
+      generation.error = err.message;
+      generation.errorCode = err.errorCode || 'IMAGE_GENERATION_FAILED';
+      generation.updatedAt = new Date().toISOString();
+      saveDb();
+      sendError(res, err.status || 502, err.message, { generation: serializeImageGeneration(generation), errorCode: generation.errorCode });
+    }
   },
 
   'POST /api/video-generations': async (req, res) => {
@@ -4028,6 +4255,7 @@ const STATIC_ROUTES = {
   '/index.html': ['index.html', 'text/html; charset=utf-8'],
   '/styles.css': ['styles.css', 'text/css; charset=utf-8'],
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
+  '/editing.js': ['editing.js', 'text/javascript; charset=utf-8'],
   '/md5.js': ['md5.js', 'text/javascript; charset=utf-8'],
   '/local-eraser.js': ['local-eraser.js', 'text/javascript; charset=utf-8'],
   '/md5-worker.js': ['md5-worker.js', 'text/javascript; charset=utf-8'],
@@ -4230,6 +4458,7 @@ server.listen(PORT, HOST, async () => {
       : `             ⚠ 未配置完成，缺少：${eraseApi.missing.join('、')}（提交任务会被拒绝）`,
   );
   console.log(`  视频生成   ${AUTODL_READY ? `AutoDL 已配置 · 工作流 ${AUTODL_VIDEO_WORKFLOW}` : '⚠ 未配置 AUTODL_API_TOKEN'}`);
+  console.log(`  图片生成   ${IMAGE_GENERATION_READY ? `火山方舟已配置 · ${SEEDREAM_MODEL}` : '⚠ 未配置 ARK_API_KEY'}`);
   console.log(`  过期策略   源文件 ${UPLOAD_TTL_MS / 3600000} 小时后删除（含 MD5 索引），每 ${SWEEP_INTERVAL_MS / 1000}s 扫描一次`);
   if (swept.removed) console.log(`             启动时清理了 ${swept.removed} 个过期文件`);
   console.log(`  并发       同时在场 ${MAX_ACTIVE_TASKS} · 提交 ${SUBMIT_CONCURRENCY} · 回传 ${FETCH_CONCURRENCY}`);
@@ -4239,6 +4468,7 @@ server.listen(PORT, HOST, async () => {
 
 // 定时清理过期文件（同时兜住跨天的会话失效）
 setInterval(() => {
+  pollEditingJobs().catch(err=>console.error('[editing]',err.message));
   pollVideoGenerations().catch((err) => console.error('[video-generation] 后台查询失败:', err.message));
 }, 15000).unref?.();
 

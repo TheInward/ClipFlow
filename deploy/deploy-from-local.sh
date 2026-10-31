@@ -49,7 +49,7 @@ log "上传代码到 ${ECS_IP}:${REMOTE_SRC}"
 "${SSH[@]}" "mkdir -p ${REMOTE_SRC} && rm -rf ${REMOTE_SRC}/public ${REMOTE_SRC}/deploy"
 tar --exclude='./data' --exclude='./node_modules' --exclude='./.git' \
     -czf - -C "${SRC_DIR}" \
-    server.mjs pipeline.mjs media.mjs zip.mjs accounts.mjs ratelimit.mjs recreation.mjs video-variants.mjs minimax-h3.mjs hypit-recreation.mjs package.json README.md public deploy scripts docs test integrations \
+    server.mjs pipeline.mjs media.mjs zip.mjs accounts.mjs ratelimit.mjs recreation.mjs video-variants.mjs minimax-h3.mjs hypit-recreation.mjs vibe-editing.mjs package.json README.md public deploy scripts docs test integrations \
   | "${SSH[@]}" "tar -xzf - -C ${REMOTE_SRC}"
 
 # ---------------------------------------------------------------- 3. 安装
